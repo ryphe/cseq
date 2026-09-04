@@ -52,3 +52,8 @@
 | **Project & Export** | Versioned trailing sections ensure forward/backward compatibility. Deterministic `WAV` export (16/24/32‑bit with TPDF dithering) using the exact same render loop as live playback. Export is bit‑for‑bit identical to what you hear |
 | **Real‑Time Safety** | Audio callback is allocation‑free, I/O‑free, and GUI‑free. SIMD‑accelerated track summing (AVX2/SSE2). Denormal‑hardened (FTZ/DAZ). Heavy lifting (decode, save, export, peak‑build, SF2 pre‑render) runs on background workers, never stalls playback |
 | **Visualizer** | Real‑time spectrum + oscilloscope overlay (OSC/SPEC/COMBO modes). Adjustable FFT size (256–8192), channel routing (Stereo/L/R/M‑S), zoom, and color hue. Hover for frequency/note/dB tooltip. Powered by a lock‑free audio ring |
+
+### libraries
+
+- [miniaudio](https://github.com/mackron/miniaudio)
+- [TinySoundFont](github.com/schellingb/TinySoundFont)
