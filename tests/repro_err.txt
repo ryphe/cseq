@@ -1,0 +1,15 @@
+PROBE cache: enter kind=1
+PROBE pre-geom hwnd=0000000000870168 dc=FFFFFFFFD2013288
+PROBE post-geom
+PROBE cache: geom ok keyCount=8
+PROBE cache: keys+grid rows ok
+PROBE cache: vgrid ok
+PROBE cache: note 0 pitch=0
+PROBE cache: note 1 pitch=1
+PROBE cache: note 2 pitch=2
+PROBE cache: note 3 pitch=3
+PROBE cache: notes ok
+PROBE cache: bottom bar ok
+PROBE cache: enter kind=2
+PROBE pre-geom hwnd=0000000000870168 dc=FFFFFFFFD2013288
+PROBE post-geom
