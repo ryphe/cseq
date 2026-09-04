@@ -29,13 +29,13 @@
 
 | Control | Description |
 | :--- | :--- |
+| **Keybinds** | Press `K` or click the `[KEYBINDS]` button in the toolbar to view a list of keyboard shortcuts |
 | **Timeline Canvas** | Drag clips to move; drag edges to trim/slip; drag handles to adjust fades; drag marquee to select multiple; `Ctrl+Drag` to copy clips in-place, right‑click for context menus |
 | **Track Headers** | Click to mute; `Shift+Drag` to reorder; scroll wheel to adjust volume; right‑click for EQ, FX Rack, Pan/Width, Filter, and Granular dialogs |
 | **Piano Roll** | Click to add/delete notes; drag to move/resize; scroll wheel to adjust velocity; ADSR knobs for amplitude envelope; right‑click for note‑specific options |
 | **FX Rack** | Drag modules from the library onto the chain; drag to reorder; right‑click to remove; direct knob/slider manipulation |
 | **Media Explorer** | Browse filesystem; click to preview (looped or one‑shot); use `Import` button or drag a file to the canvas to import it at the cursor position |
 | **Synth UI** | Drag knobs to edit voice parameters; click voice pads (Quadrum); select presets from dropdown (Halo); real‑time audition via piano roll |
-| **Keybinds** | Press `K` or click the `[KEYBINDS]` button in the toolbar to view a list of keyboard shortcuts |
 
 ---
 
