@@ -44,7 +44,7 @@
 | Component | Description |
 | :--- | :--- |
 | **Scale & Capacity** | 128 tracks, 1024 bars (up to 16 beats/bar), 2048 clips, 64 unique samples (shared across clips), 32 undo/redo states |
-| **Sampling & Editing** | Zero‑copy slicing edits trim/split/duplicate clip metadata only, never the PCM buffer. Four fade curves (linear, exp, log, smooth), per‑clip volume & rate (0.01×–2.00×), slip editing, snap‑to‑grid quantisation |
+| **Sampling & Editing** | Zero‑copy slicing edits trim/split/duplicate clip metadata only, never the PCM buffer. Four fade curves (linear, exp, log, smooth), per‑clip volume & rate (0.01×–2.00×), slip editing, snap‑to‑grid quantisation. Marquee selection on timeline and piano rolls |
 | **MIDI & Sequencing** | Full piano roll with note‑by‑note velocity, length, and pitch editing. Built‑in **Generative Sequencer** for chord/arp patterns (root, scale, note count). **Humanize** tool for timing/duration/velocity randomisation. Per‑track **trigger probability** (0‑100%) for probabilistic playback |
 | **Audio Engines** | **Granular** per clip/track (density, grain size, pitch jitter, pan spread, freeze/drone). **Quadrum**: 8‑voice procedural drum synth (Kick, Snare, Clap, Hats, etc.) with FM, noise, and filters. **Halo**: 8‑voice hybrid additive/FM poly synth with spectral tilt, unison, and chorus. **SoundFont 2** with preset browser and pre‑rendered note cache |
 | **Mixing & FX** | Per‑track **3‑band parametric EQ** (sweepable frequency/Q, `±`12dB`). **Stackable filter plotter** (LP/HP/BP/Notch) with real‑time drag. **Modular FX rack**: Delay, Reverb, Compressor, Phaser, Chorus, Resonator, Lofi. Master **limiter/clipper** (switchable) and **Lo‑Fi** bus (bit depth 8‑12, sample rate 8‑32 kHz) |
