@@ -21,7 +21,7 @@
 | Signal | Description |
 | :--- | :--- |
 | **Audio Input** | `WAV`, `MP3`, `FLAC`, `OGG`, `M4A`, `AIFF`; SoundFont 2 (`.sf2`) in MIDI clips |
-| **Audio Output** | 44.1 kHz stereo mix via WASAPI; WAV export (16‑bit, 24‑bit, 32‑bit float) |
+| **Audio Output** | `44.1 kHz` `Stereo` mixdown, `WAV` export (16‑bit & 24‑bit dithered, 32‑bit float) |
 | **Visual Output** | Main timeline with waveform/MIDI clips, piano roll, parametric EQ graph, filter plotter, spectrum/oscilloscope visualizer, FX rack UI |
 
 ---
