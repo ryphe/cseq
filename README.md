@@ -43,7 +43,7 @@
 
 | Component | Description |
 | :--- | :--- |
-| **Scale & Capacity** | 128 tracks, 1024 bars (up to 16 beats/bar), 2048 clips, 256 unique samples (shared across clips), 32 undo/redo states |
+| **Scale & Capacity** | 128 tracks, 1024 bars, 2048 clips, 256 unique samples (shared across clips), 32 undo/redo states |
 | **Sampling & Editing** | Zero‑copy slicing edits trim/split/duplicate clip metadata only, never the PCM buffer. Four fade curves (linear, exp, log, smooth), per‑clip volume & rate (0.01×–2.00×), slip editing, snap‑to‑grid quantisation. Marquee selection on clip timeline and piano rolls |
 | **MIDI & Sequencing** | Multi-octave piano roll with note‑by‑note velocity, length, and pitch editing. Built‑in **Generative Sequencer** for chord/arp patterns (root, scale, note count). **Humanize** tool for timing/duration/velocity randomisation. Per‑track **trigger probability** (0‑100%) for sample/note events |
 | **Audio Engines** | **Granular** per clip/track (density, grain size, pitch jitter, pan spread, freeze/drone). **Quadrum**: 8‑voice procedural drum synth (Kick, Snare, Clap, Hats, etc.) with FM, noise, and filters. **Halo**: 8‑voice hybrid additive/FM poly synth with spectral tilt, unison, and chorus. **SoundFont 2** with preset browser and pre‑rendered note cache |
