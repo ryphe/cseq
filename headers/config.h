@@ -26,7 +26,7 @@
 #define NUM_CHANNELS 2
 #define MAX_TRACKS 128
 #define MIN_TRACKS 1
-#define MAX_SAMPLES 64
+#define MAX_SAMPLES 256 // bumped from 64
 #define MAX_CLIPS 2048
 #define BEATS_PER_BAR 4
 #define FADE_SAMPLES 64
