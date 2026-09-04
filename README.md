@@ -56,5 +56,5 @@
 ### libraries
 
 - [miniaudio](https://github.com/mackron/miniaudio)
-- [TinySoundFont](github.com/schellingb/TinySoundFont)
-- [Airwindows](github.com/airwindows/airwindows) (modified `SmoothEQ3`)
+- [TinySoundFont](https://github.com/schellingb/TinySoundFont)
+- [Airwindows](https://github.com/airwindows/airwindows) (ported `SmoothEQ3`)
