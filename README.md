@@ -18,7 +18,7 @@
 
 ### input/output
 
-| Signal | Description |
+| Component | Description |
 | :--- | :--- |
 | **Audio Input** | `WAV`, `MP3`, `FLAC`, `OGG`, `M4A`, `AIFF`; SoundFont 2 (`.sf2`) in MIDI clips |
 | **Audio Output** | `44.1 kHz` `Stereo` mixdown, `WAV` export (16‑bit & 24‑bit dithered, 32‑bit float) |
@@ -27,7 +27,7 @@
 
 ### controls
 
-| Control | Description |
+| Component | Description |
 | :--- | :--- |
 | **Keybinds** | Press `K` or click the `[KEYBINDS]` button in the toolbar to view a list of keyboard shortcuts |
 | **Timeline Canvas** | Drag clips to move; drag edges to trim/slip; drag handles to adjust fades; drag marquee to select multiple; `Ctrl+Drag` to copy clips in-place, right‑click for context menus |
