@@ -27,12 +27,6 @@
 
 ### controls
 
-Here's the expanded controls table — one row per major interaction surface, with modifiers, gestures, and context‑specific behaviours spelled out.
-
----
-
-### controls
-
 | Component | Description |
 | :--- | :--- |
 | **Keybinds Reference** | Press `K` or click the `[KEYBINDS]` button in the top toolbar to open a searchable reference window listing every keyboard shortcut — no need to memorise anything |
