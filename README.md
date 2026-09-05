@@ -21,7 +21,7 @@
 | Component | Description |
 | :--- | :--- |
 | **Audio Input** | `WAV`, `MP3`, `FLAC`, `OGG`, `M4A`, `AIFF`; SoundFont 2 (`.sf2`) in MIDI clips |
-| **Audio Output** | `44.1 kHz` `Stereo` mixdown, `WAV` export (16‑bit & 24‑bit dithered, 32‑bit float) |
+| **Audio Output** | `44.1 kHz` `Stereo` mixdown, `WAV` export (16‑bit & 24‑bit TPDF dithered, 32‑bit float) |
 
 ---
 
