@@ -172,6 +172,25 @@ static inline float quantize_beat_16th(float beat) {
     return floorf(beat / frac + 0.5f) * frac;
 }
 
+// Snap DOWN to the current grid division: the grid line at or left of the
+// given beat (the grid cell containing it). Used for click-to-place note entry
+// so a new note lands in exactly the cell the user clicked, instead of
+// rounding half-way-up and jumping right into the next cell.
+static inline float quantize_beat_floor(float beat) {
+    float frac = grid_division_beat_fraction(g_Seq.gridDivision);
+    return floorf(beat / frac) * frac;
+}
+
+// MIDI note velocity (0..1 normalized) -> playback gain. A gentle exponential
+// curve: 1.0 = unity, 0.5 = about -15 dB, 0 = silent. Shared by the sample /
+// SoundFont voice paths (audio.h), the Halo gain normalization, and the
+// Quadrum one-shot transients so velocity behaves consistently app-wide.
+static inline float midi_velocity_gain(float vNorm) {
+    if (vNorm <= 0.0f) return 0.0f;
+    if (vNorm > 1.0f) vNorm = 1.0f;
+    return expf((vNorm - 1.0f) * 1.5f * 2.302585093f);
+}
+
 
 static inline float apply_clip_swing(float beat, float swing) {
     if (swing <= 0.001f) return beat;

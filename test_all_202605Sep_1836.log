@@ -1,0 +1,200 @@
+cseq test_all — started Sat 05 Sep 2026 18:36:28.69
+====================================================================
+cseq test_all
+root : C:\Users\aorav\Desktop\anti\cseq\
+RESULT: 0 passed, 0 failed
+ALL CHECKS PASSED
+================================================================
+  cleanup done.
+
+================================================================
+RESULT: 0 passed, 0 failed
+ALL CHECKS PASSED
+================================================================
+
+== [1/6] Toolchain setup ==
+MSVC environment ready.
+
+== [2/6] Release build (project must compile at /W4 /WX) ==
+=======================================================
+building cseq
+=======================================================
+[INFO] Compiling resources from cseq.rc...
+[INFO] Resource compiled successfully: 
+[INFO] Compiling C source files...
+main.c
+eq.c
+vorbis.c
+miniaudio.c
+Generating code
+Finished generating code
+[SUCCESS] Build complete: cseq.exe
+BUILD: PASS (cseq.exe produced, zero /W4 /WX errors)
+
+== [3/6] Compile standalone harnesses ==
+  extracting fade code blocks from headers...
+  fade extraction ok.
+  compiling adsr_verify...
+adsr_verify.c
+  -> adsr_verify: compiled ok
+  compiling dsp_verify...
+dsp_verify.c
+C:\Users\aorav\Desktop\anti\cseq\headers\ui.h(1911): warning C4013: 'sfont_is_loaded' undefined; assuming extern returning int
+C:\Users\aorav\Desktop\anti\cseq\headers\ui.h(1914): warning C4013: 'sfont_name' undefined; assuming extern returning int
+C:\Users\aorav\Desktop\anti\cseq\headers\ui.h(1915): warning C4013: 'sfont_preset_name' undefined; assuming extern returning int
+C:\Users\aorav\Desktop\anti\cseq\headers\ui.h(1915): warning C4013: 'sfont_active_preset_slot' undefined; assuming extern returning int
+C:\Users\aorav\Desktop\anti\cseq\headers\ui.h(1914): warning C4047: 'initializing': 'const char *' differs in levels of indirection from 'int'
+C:\Users\aorav\Desktop\anti\cseq\headers\ui.h(1915): warning C4047: 'initializing': 'const char *' differs in levels of indirection from 'int'
+  -> dsp_verify: compiled ok
+  compiling reverse_verify...
+reverse_verify.c
+C:\Users\aorav\Desktop\anti\cseq\headers\ui.h(1911): warning C4013: 'sfont_is_loaded' undefined; assuming extern returning int
+C:\Users\aorav\Desktop\anti\cseq\headers\ui.h(1914): warning C4013: 'sfont_name' undefined; assuming extern returning int
+C:\Users\aorav\Desktop\anti\cseq\headers\ui.h(1915): warning C4013: 'sfont_preset_name' undefined; assuming extern returning int
+C:\Users\aorav\Desktop\anti\cseq\headers\ui.h(1915): warning C4013: 'sfont_active_preset_slot' undefined; assuming extern returning int
+C:\Users\aorav\Desktop\anti\cseq\headers\ui.h(1914): warning C4047: 'initializing': 'const char *' differs in levels of indirection from 'int'
+C:\Users\aorav\Desktop\anti\cseq\headers\ui.h(1915): warning C4047: 'initializing': 'const char *' differs in levels of indirection from 'int'
+  -> reverse_verify: compiled ok
+  compiling repro_halo...
+repro_halo.c
+  -> repro_halo: compiled ok
+  compiling fade_wedge_verify...
+fade_wedge_verify.c
+  -> fade_wedge_verify: compiled ok
+
+== [4/6] Run harnesses ==
+
+--- adsr_verify : ADSR envelope math (audio.h MIDI audition) ---
+ok  : held: mid-attack gain is 0.5 at atk/2
+ok  : held: gain peaks at 1.0 at end of attack
+ok  : held: mid-decay gain 1->0.4 halfway = 0.7
+ok  : held: settles on Sustain knob (0.4)
+ok  : key-up at sustain: tail starts at exactly 0.4
+ok  : key-up at sustain: half-way tail = 0.2
+ok  : key-up at sustain: tail reaches 0 at relFrames
+ok  : mid-attack key-up: tail starts at level-at-release (0.25)
+ok  : mid-attack key-up: tail fades linearly over relFrames
+ok  : sustain 0 held: silent
+ok  : sustain 0 key-up: no audible tail (retires immediately)
+ok  : release knob 0: no tail
+ok  : freeze frame is gain-continuous (no click)
+
+All checks passed
+  -> adsr_verify: PASS (exit 0)
+
+--- dsp_verify : DSP / FX modules + TrackFilter + peak pyramid ---
+=== fx.h new modules verification ===
+ok:   Resonator net peak gain = sqrt(Q) at f0 (Q=20)
+ok:   Resonator mix=0 is pure dry
+ok:   Resonator rejects off-resonance (3kHz)
+ok:   Resonator stays bounded at Q=40 with loud sweep
+ok:   Compressor 4:1 @ -12dB reduces 0dBFS sine
+ok:   Compressor no GR below threshold
+ok:   Compressor gain ripple < 1.5dB at 60Hz/10ms release (no buzz)
+ok:   Phaser output bounded during full sweep
+ok:   Phaser mix=0 is pure dry
+ok:   Phaser 50% mix ~unity through low band (notches elsewhere)
+ok:   Phaser feedback 90% stays musical (softclip bounds resonance)
+ok:   Chorus impulse produces bounded wet signal
+ok:   Chorus 50% equal-power mix stays level (no 100%-wet vibrato)
+ok:   Chorus mix=0 is pure dry
+ok:   TrackFilter LP @1kHz Butterworth = -3.0dB
+ok:   TrackFilter HP @1kHz rejects 100Hz
+ok:   TrackFilter BP peak = 0dB at f0
+ok:   TrackFilter Notch nulls f0
+ok:   TrackFilter stacked LP+HP = -6dB at f0
+ok:   Stored magnitude curve agrees with analytic value
+ok:   No bands -> inactive
+ok:   No bands -> flat 0dB curve
+ok:   TrackFilter process stays bounded on sine
+ok:   Sweeping cutoff slews smoothly (no per-tick step discontinuity)
+ok:   Smoothed cutoff converges to target
+ok:   set_target clamps freq/Q to valid range
+ok:   Pyramid built synchronously with multiple levels
+ok:   Level-0 min/max matches brute force (incl. clamped tail)
+ok:   Tail bin contains the f=10000 spike (tail clamp works)
+ok:   Every LOD level equals 4:1 min/max of its children
+ok:   free_peak_cache clears all fields
+ok:   Preview strided scan reaches the file tail
+
+RESULT: ALL PASSED (0 failures)
+  -> dsp_verify: PASS (exit 0)
+
+--- reverse_verify : Sample clip reversing + undo/redo ---
+=== Sample Clip Reversing Verification ===
+ok:   Full sample clip mirrors to offset 0
+ok:   Re-reversing full sample returns to offset 0
+ok:   Sliced clip mirrors offset: 44100 - 5000 - 10000 = 29100
+ok:   Re-reversing sliced clip returns exactly to original offset 5000
+ok:   Rate 2.0x clamping at sample end mirrors cleanly to 0
+ok:   Rate 0.5x mirrors correctly: 44100 - 10000 - 11025 = 23075
+ok:   Rate 0.5x re-reverses exactly back to 10000
+ok:   Out of bounds offset safely returns 0 without underflow
+ok:   First reverse creates sample at index s0 + 1
+ok:   g_Seq.sampleCount incremented to 2
+ok:   Name suffixed with ' (reversed)'
+ok:   Frame count matches original
+ok:   Reversed PCM values match exact end-to-start flip for stereo
+ok:   Re-requesting reversed sample on s0 dedups to existing revIdx1
+ok:   sampleCount unchanged on dedup
+ok:   Reversing reversed sample returns original sample index s0 (lossless dedup)
+ok:   sampleCount still 2 - zero redundant samples added
+ok:   Batch reverse: Clip 0 remapped to sample 1
+ok:   Batch reverse: Clip 0 offset remapped to 700
+ok:   Batch reverse: Clip 1 remapped to sample 1 (shared sample dedup)
+ok:   Batch reverse: Clip 1 offset remapped to 300
+ok:   Batch reverse: Clip 2 returned to sample 0
+ok:   Batch reverse: Clip 2 offset remapped to 300
+ok:   Undo restores Clip 0 sampleIndex=0 and offset=100
+ok:   Undo restores Clip 1 sampleIndex=0 and offset=400
+ok:   Undo restores Clip 2 sampleIndex=1 and offset=500
+ok:   Redo reapplies Clip 0 sampleIndex=1 and offset=700
+ok:   Redo reapplies Clip 1 sampleIndex=1 and offset=300
+ok:   Redo reapplies Clip 2 sampleIndex=0 and offset=300
+
+=== RESULT: PASSED (0 failures) ===
+  -> reverse_verify: PASS (exit 0)
+
+--- repro_halo : Piano-roll paint path for all clip kinds (GDI) ---
+[kind 1] start
+[kind 1] clip ok
+[kind 1] base=60
+[kind 1] dirty=1
+[kind 1] cache ok
+[kind 1] overlays ok
+[kind 1] overlays2 ok
+[kind 2] start
+[kind 2] clip ok
+[kind 2] base=60
+[kind 2] dirty=1
+[kind 2] cache ok
+[kind 2] overlays ok
+[kind 2] overlays2 ok
+ALL PAINT PATHS OK
+  -> repro_halo: PASS (exit 0)
+
+--- fade_wedge_verify : Fade wedge vs. envelope curve alignment ---
+ok  : linear fade-in wedge reaches the curve line in every column
+ok  : exp fade-in wedge reaches the curve line in every column
+ok  : smooth fade-in wedge reaches the curve line in every column
+ok  : log fade-in wedge reaches the curve line in every column
+ok  : linear fade-out wedge reaches the curve line in every column
+ok  : exp fade-out wedge reaches the curve line in every column
+ok  : smooth fade-out wedge reaches the curve line in every column
+ok  : log fade-out wedge reaches the curve line in every column
+ok  : exp fade-in wedge reaches the curve line in every column
+ok  : log fade-out wedge reaches the curve line in every column
+
+all fade wedge checks passed
+  -> fade_wedge_verify: PASS (exit 0)
+
+== [5/6] Cleanup ==
+RESULT: 6 passed, 0 failed
+ALL CHECKS PASSED
+================================================================
+  cleanup done.
+
+================================================================
+RESULT: 6 passed, 0 failed
+ALL CHECKS PASSED
+================================================================

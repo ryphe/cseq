@@ -17,6 +17,13 @@ extern HWND g_granHwnd;
 extern int  g_granTrack;
 extern int  g_granClip;
 
+// "Keyboard" audition toggle (bottom-bar button right of the Octave button).
+// Off by default; when on, QWERTY keys sound notes while the window is
+// focused. Mouse strip audition and keyboard audition share one polyphonic
+// held-note set (GranularEngine.auditionNotes, union built in types.h), so
+// both can sound up to MIDI_KB_MAX notes at once.
+static bool g_granKbMode = false;
+
 static inline GranularEngine* gran_get_current_engine(void) {
     if (g_granClip >= 0 && g_granClip < MAX_CLIPS) {
         return &g_ClipGran[g_granClip];
@@ -134,17 +141,17 @@ static inline void granular_stop_all(void) {
  
 static inline bool granular_is_active(void) {
     for (int t = 0; t < MAX_TRACKS; ++t) {
-        if (g_TrackGran[t].auditionNote > 0 || (g_TrackGran[t].enabled && g_TrackGran[t].droneMode)) return true;
+        if (g_TrackGran[t].auditionNoteCount > 0 || (g_TrackGran[t].enabled && g_TrackGran[t].droneMode)) return true;
     }
     for (int c = 0; c < MAX_CLIPS; ++c) {
-        if (g_ClipGran[c].auditionNote > 0 || (g_ClipGran[c].enabled && g_ClipGran[c].droneMode)) return true;
+        if (g_ClipGran[c].auditionNoteCount > 0 || (g_ClipGran[c].enabled && g_ClipGran[c].droneMode)) return true;
     }
     return false;
 }
 
  
 static inline void gran_spawn_grain(GranularEngine *e, float rate, float vel, float playbackRateMult) {
-    if (!e || (!e->enabled && e->auditionNote <= 0)) return;
+    if (!e || (!e->enabled && e->auditionNoteCount <= 0)) return;
     AudioSample *s = gran_get_active_sample(e);
     if (!s || !s->loaded || !s->pFrames || s->frameCount < 256) return;
 
@@ -237,7 +244,7 @@ static inline void granular_process_engine(GranularEngine *e, float *L, float *R
                                            const Clip *clip) {
     if (!e) return;
     ensure_granular_params(e, clip ? clip->sampleIndex : e->sampleIndex);
-    if (!e->enabled && e->auditionNote <= 0) return;
+    if (!e->enabled && e->auditionNoteCount <= 0) return;
 
     AudioSample *s = gran_get_active_sample(e);
     if (!s || !s->loaded || !s->pFrames || s->frameCount < 256) return;
@@ -278,8 +285,15 @@ static inline void granular_process_engine(GranularEngine *e, float *L, float *R
             while (e->spawnAcc >= 1.0f) {
                 e->spawnAcc -= 1.0f;
 
-                if (e->auditionNote > 0) {
-                    float rate = gran_midi_to_rate(e->auditionNote, e->pitch);
+                if (e->auditionNoteCount > 0) {
+                    // Round-robin across every held note so chords stream
+                    // grains on all pitches at the shared density.
+                    int grab = e->auditionSpawnIdx % e->auditionNoteCount;
+                    e->auditionSpawnIdx = grab + 1;
+                    int useNote = e->auditionNotes[grab];
+                    if (useNote < 0) useNote = 0;
+                    if (useNote > 127) useNote = 127;
+                    float rate = gran_midi_to_rate(useNote, e->pitch);
                     gran_spawn_grain(e, rate, 0.9f, playbackRateMult);
                 } else if (e->droneMode) {
                     float rate = gran_midi_to_rate(60, e->pitch);
@@ -399,7 +413,10 @@ static inline void gran_draw_note_display(HDC hdc, int x, int y, int w, int h, G
         int noteInOct = midi % 12;
         bool isBlack = (noteInOct == 1 || noteInOct == 3 || noteInOct == 6 || noteInOct == 8 || noteInOct == 10);
         bool isRootC = (noteInOct == 0);
-        bool isAuditioning = (e->auditionNote == midi);
+        bool isAuditioning = false;
+        for (int a = 0; a < e->auditionNoteCount; ++a) {
+            if (e->auditionNotes[a] == midi) { isAuditioning = true; break; }
+        }
 
         int ky1 = y + (int)(k * rowH);
         int ky2 = y + (int)((k + 1) * rowH);
@@ -852,6 +869,7 @@ static LRESULT CALLBACK GranWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         int botY = h - 26;
         RECT clrRc = { 14, botY, 100, botY + 20 };
         RECT octRc = { 106, botY, 206, botY + 20 };
+        RECT kbRc  = { 212, botY, 302, botY + 20 };
 
         HBRUSH btnBr = CreateSolidBrush(RGB(26, 32, 42));
         HPEN btnPn = CreatePen(PS_SOLID, 1, RGB(48, 58, 72));
@@ -859,6 +877,19 @@ static LRESULT CALLBACK GranWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         SelectObject(memDC, btnPn);
         RoundRect(memDC, clrRc.left, clrRc.top, clrRc.right, clrRc.bottom, 3, 3);
         RoundRect(memDC, octRc.left, octRc.top, octRc.right, octRc.bottom, 3, 3);
+        if (g_granKbMode) {
+            HBRUSH kbBg = CreateSolidBrush(RGB(22, 90, 55));
+            HPEN kbPn  = CreatePen(PS_SOLID, 1, RGB(80, 240, 180));
+            SelectObject(memDC, kbBg);
+            SelectObject(memDC, kbPn);
+            RoundRect(memDC, kbRc.left, kbRc.top, kbRc.right, kbRc.bottom, 3, 3);
+            SelectObject(memDC, btnPn);
+            SelectObject(memDC, btnBr);
+            DeleteObject(kbPn);
+            DeleteObject(kbBg);
+        } else {
+            RoundRect(memDC, kbRc.left, kbRc.top, kbRc.right, kbRc.bottom, 3, 3);
+        }
         SelectObject(memDC, origPenG);
         SelectObject(memDC, origBrushG);
         DeleteObject(btnPn);
@@ -877,11 +908,17 @@ static LRESULT CALLBACK GranWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         SetTextColor(memDC, RGB(110, 210, 240));
         DrawTextA(memDC, octBuf, -1, &octRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
+        SetTextColor(memDC, g_granKbMode ? RGB(160, 255, 205) : RGB(140, 155, 175));
+        DrawTextA(memDC, "Keyboard", -1, &kbRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
         
         SetTextColor(memDC, RGB(140, 155, 175));
-        RECT hintRc = { 210, botY + 1, w - 14, botY + 21 };
-        DrawTextA(memDC, "[L/R Drag] Select | [Click] Add/Delete | [Keys] Audition | [ESC] Close",
-                  -1, &hintRc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        RECT hintRc = { 306, botY + 1, w - 14, botY + 21 };
+        const char* hintTxt = g_granKbMode
+            ? "Keys: A W S E D F T G Y H U J K O L P"
+            : "[L/R Drag] Select | [Click] Add/Delete | [ESC] Close";
+        DrawTextA(memDC, hintTxt, -1, &hintRc,
+                  DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
         
         
@@ -1064,6 +1101,18 @@ static LRESULT CALLBACK GranWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
             }
+            if (mx >= 212 && mx <= 302) {
+                g_granKbMode = !g_granKbMode;
+                if (g_granKbMode) {
+                    SetFocus(hwnd);
+                } else {
+                    seq_lock();
+                    gran_audition_clear(e);
+                    seq_unlock();
+                }
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
         }
 
         int rollY = 158;
@@ -1078,7 +1127,7 @@ static LRESULT CALLBACK GranWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 int baseNote = gran_get_base_note(e);
                 int midi = baseNote + (GRAN_PIANO_KEYS - 1 - k);
                 seq_lock();
-                e->auditionNote = midi;
+                gran_audition_set_mouse(e, midi);
                 float clipRate = gran_get_clip_playback_rate(e);
                 gran_spawn_grain(e, gran_midi_to_rate(midi, e->pitch), 0.95f, clipRate);
                 seq_unlock();
@@ -1199,7 +1248,7 @@ static LRESULT CALLBACK GranWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             return 0;
         }
 
-        if (e->auditionNote > 0) {
+        if (e->mouseNote >= 0) {
             int rollY = 158;
             int rollH = h - rollY - 32;
             float rowH = (float)rollH / (float)GRAN_PIANO_KEYS;
@@ -1207,9 +1256,9 @@ static LRESULT CALLBACK GranWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             if (k >= 0 && k < GRAN_PIANO_KEYS) {
                 int baseNote = gran_get_base_note(e);
                 int midi = baseNote + (GRAN_PIANO_KEYS - 1 - k);
-                if (midi != e->auditionNote) {
+                if (midi != e->mouseNote) {
                     seq_lock();
-                    e->auditionNote = midi;
+                    gran_audition_set_mouse(e, midi);
                     float clipRate = gran_get_clip_playback_rate(e);
                     gran_spawn_grain(e, gran_midi_to_rate(midi, e->pitch), 0.95f, clipRate);
                     seq_unlock();
@@ -1401,9 +1450,9 @@ static LRESULT CALLBACK GranWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             e->isDraggingParam = false;
             ReleaseCapture();
         }
-        if (e->auditionNote > 0) {
+        if (e->mouseNote >= 0) {
             seq_lock();
-            e->auditionNote = 0;
+            gran_audition_set_mouse(e, -1);
             seq_unlock();
             ReleaseCapture();
             InvalidateRect(hwnd, NULL, FALSE);
@@ -1526,8 +1575,36 @@ static LRESULT CALLBACK GranWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         return 0;
     }
 
+    case WM_MOUSEWHEEL: {
+        // Wheel over the Octave button shifts the roll one octave per notch
+        // (up = octave up, down = octave down), matching the L/R click path.
+        if (!e) return 0;
+        short zDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+        if (zDelta == 0) break;
+        POINT pt;
+        GetCursorPos(&pt);
+        ScreenToClient(hwnd, &pt);
+        RECT rcW; GetClientRect(hwnd, &rcW);
+        int botY = (rcW.bottom - rcW.top) - 26;
+        if (pt.x >= 106 && pt.x <= 206 && pt.y >= botY && pt.y <= botY + 20) {
+            if (zDelta > 0) {
+                if (e->octaveShift < 3) e->octaveShift++;
+            } else {
+                if (e->octaveShift > -3) e->octaveShift--;
+            }
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+        break;
+    }
+
     case WM_KEYDOWN:
         if (wParam == VK_ESCAPE || wParam == VK_RETURN) {
+            if (e) {
+                seq_lock();
+                gran_audition_clear(e);
+                seq_unlock();
+            }
             ShowWindow(hwnd, SW_HIDE);
         } else if ((wParam == VK_DELETE || wParam == VK_BACK) && e) {
             seq_lock();
@@ -1567,10 +1644,52 @@ static LRESULT CALLBACK GranWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
             seq_unlock();
             InvalidateRect(hwnd, NULL, FALSE);
+        } else if (g_granKbMode && e &&
+                   !(GetKeyState(VK_CONTROL) & 0x8000) &&
+                   !(GetKeyState(VK_SHIFT) & 0x8000) &&
+                   !(GetKeyState(VK_MENU) & 0x8000)) {
+            // Keyboard note audition (A-P QWERTY row, relative to the roll's
+            // current octave). Notes join the same polyphonic held-set as the
+            // mouse strip, so keyboard and mouse chords coexist. Auto-repeat
+            // keeps the note held but only spawns a fresh grain on the
+            // initial press.
+            int semi = pr_key_to_semitone((int)wParam);
+            if (semi >= 0) {
+                bool isRepeat = (lParam & 0x40000000) != 0;
+                int base = gran_get_base_note(e);
+                int midi = base + semi;
+                if (midi > 127) midi = 127;
+                if (!isRepeat) {
+                    seq_lock();
+                    gran_audition_kb_add(e, (int)wParam, midi);
+                    float clipRate = gran_get_clip_playback_rate(e);
+                    gran_spawn_grain(e, gran_midi_to_rate(midi, e->pitch), 0.95f, clipRate);
+                    seq_unlock();
+                    InvalidateRect(hwnd, NULL, FALSE);
+                }
+            }
         }
         return 0;
 
+    case WM_KEYUP:
+        // Release by the physical key: each entry's pitch was resolved at
+        // press time, so re-resolving here (current octave) could miss the
+        // entry and strand the held note.
+        if (e && g_granKbMode && pr_key_to_semitone((int)wParam) >= 0) {
+            seq_lock();
+            gran_audition_kb_remove(e, (int)wParam);
+            seq_unlock();
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+        break;
+
     case WM_CLOSE:
+        if (e) {
+            seq_lock();
+            gran_audition_clear(e);
+            seq_unlock();
+        }
         ShowWindow(hwnd, SW_HIDE);
         return 0;
 
@@ -1647,6 +1766,10 @@ static inline void open_granular_dialog(HWND parentHwnd, int trackIdx) {
     GranularEngine *e = &g_TrackGran[trackIdx];
     e->trackIdx = trackIdx;
     e->clipIdx = -1;
+
+    seq_lock();
+    gran_audition_clear(e);
+    seq_unlock();
 
     
     

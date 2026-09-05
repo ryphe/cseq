@@ -36,12 +36,15 @@ typedef struct {
     // note-off releases that voice directly WITHOUT re-entering the allocator
     // (which can reset phase/filter state and cause a pop).
     HaloVoice* noteVoice[MIDI_MAX_NOTES];
-    // Dedicated audition state: the pitch currently held by a piano-key click
-    // (-1 if none), the exact voice for that key, and per-note tracking for the
-    // preview PLAY loop (separate from timeline noteActive so key audition and
-    // the loop never collide).
-    int    auditionActivePitch;
-    HaloVoice* auditionVoice;
+    // Dedicated audition state: up to 8 simultaneously held keyboard keys
+    // (QWERTY mapping). auditionKeyPitch[i] is the pitch of key slot i and
+    // auditionKeyVoice[i] the exact voice allocated for it, so note-off
+    // releases that voice directly WITHOUT re-entering the allocator (which
+    // can reset phase/filter state and cause a pop). The preview PLAY loop has
+    // its own per-note tracking (auditionNoteActive) so key audition and the
+    // loop never collide.
+    int    auditionKeyPitch[8];
+    HaloVoice* auditionKeyVoice[8];
     bool   auditionNoteActive[MIDI_MAX_NOTES];
     HaloVoice* auditionNoteVoice[MIDI_MAX_NOTES];
     // Previous clip-local beat, used to detect loop-wrap/scrub discontinuities
@@ -63,10 +66,16 @@ typedef struct {
     int    pos[8];         // playback read position
     bool   playing[8];     // currently sounding
     bool   cached[8];      // buf[v] holds a render matching the current patch
+    // Playback gain for the currently sounding transient of voice v, taken
+    // from the triggering note's velocity (midi_velocity_gain curve). Set at
+    // trigger time alongside pos/playing; the mixer applies it sample-wise.
+    float  vel[8];
     // Per-note-index edge tracking for timeline playback (see SynthHaloState).
     bool   noteActive[MIDI_MAX_NOTES];
-    // Dedicated audition state (see SynthHaloState).
-    int    auditionActiveVoice;
+    // Dedicated audition state (see SynthHaloState). auditionKeyArmed[v] is
+    // true while keyboard key v is held, so a key press triggers the one-shot
+    // voice only once (on the rising edge).
+    bool   auditionKeyArmed[8];
     bool   auditionNoteActive[MIDI_MAX_NOTES];
     // A cheap signature of the current patch so we can detect edits and
     // invalidate the cache without comparing every field.
@@ -114,8 +123,8 @@ static inline void synth_state_init_clip(int clipIdx) {
         voice_manager_init(&h->vm, (double)SAMPLE_RATE);
         memset(h->noteActive, 0, sizeof(h->noteActive));
         memset(h->noteVoice, 0, sizeof(h->noteVoice));
-        h->auditionActivePitch = -1;
-        h->auditionVoice = NULL;
+        memset(h->auditionKeyPitch, 0xFF, sizeof(h->auditionKeyPitch));
+        memset(h->auditionKeyVoice, 0, sizeof(h->auditionKeyVoice));
         memset(h->auditionNoteActive, 0, sizeof(h->auditionNoteActive));
         memset(h->auditionNoteVoice, 0, sizeof(h->auditionNoteVoice));
         h->lastLocalBeat = 0.0f;
@@ -124,7 +133,7 @@ static inline void synth_state_init_clip(int clipIdx) {
     SynthQuadrumState* q = &g_ClipQuadrum[clipIdx];
     memset(q->playing, 0, sizeof(q->playing));
     memset(q->noteActive, 0, sizeof(q->noteActive));
-    q->auditionActiveVoice = -1;
+    memset(q->auditionKeyArmed, 0, sizeof(q->auditionKeyArmed));
     memset(q->auditionNoteActive, 0, sizeof(q->auditionNoteActive));
     memset(q->cached, 0, sizeof(q->cached));
     if (clipIdx < g_Seq.clipCount && g_Seq.clips[clipIdx].clipKind == CLIP_KIND_QUADRUM) {
@@ -242,8 +251,8 @@ static inline void synth_stop_all(void) {
             }
             memset(h->noteActive, 0, sizeof(h->noteActive));
             memset(h->noteVoice, 0, sizeof(h->noteVoice));
-            h->auditionActivePitch = -1;
-            h->auditionVoice = NULL;
+            memset(h->auditionKeyPitch, 0xFF, sizeof(h->auditionKeyPitch));
+            memset(h->auditionKeyVoice, 0, sizeof(h->auditionKeyVoice));
             memset(h->auditionNoteActive, 0, sizeof(h->auditionNoteActive));
             memset(h->auditionNoteVoice, 0, sizeof(h->auditionNoteVoice));
             h->lastLocalBeat = 0.0f;
@@ -251,7 +260,7 @@ static inline void synth_stop_all(void) {
         SynthQuadrumState* q = &g_ClipQuadrum[i];
         memset(q->playing, 0, sizeof(q->playing));
         memset(q->noteActive, 0, sizeof(q->noteActive));
-        q->auditionActiveVoice = -1;
+        memset(q->auditionKeyArmed, 0, sizeof(q->auditionKeyArmed));
         memset(q->auditionNoteActive, 0, sizeof(q->auditionNoteActive));
     }
 }
@@ -288,19 +297,21 @@ static inline int synth_snapshot_take(SynthHaloState* dstHalo, SynthQuadrumState
                 dstHalo->auditionNoteVoice[i] = NULL;
         }
     }
-    if (srcHalo->auditionVoice) {
-        ptrdiff_t off = srcHalo->auditionVoice - srcHalo->vm.voices;
-        if (off >= 0 && off < HALO_MAX_VOICES)
-            dstHalo->auditionVoice = &dstHalo->vm.voices[off];
-        else
-            dstHalo->auditionVoice = NULL;
+    for (int i = 0; i < 8; ++i) {
+        if (srcHalo->auditionKeyVoice[i]) {
+            ptrdiff_t off = srcHalo->auditionKeyVoice[i] - srcHalo->vm.voices;
+            if (off >= 0 && off < HALO_MAX_VOICES)
+                dstHalo->auditionKeyVoice[i] = &dstHalo->vm.voices[off];
+            else
+                dstHalo->auditionKeyVoice[i] = NULL;
+        }
     }
     SynthQuadrumState* src = &g_ClipQuadrum[clipIdx];
     SynthQuadrumState* dst = dstQuad;
     memset(dst, 0, sizeof(*dst));
     // Copy per-clip edge/audition state (per-voice buffers handled below).
     memcpy(dst->noteActive, src->noteActive, sizeof(dst->noteActive));
-    dst->auditionActiveVoice = src->auditionActiveVoice;
+    memcpy(dst->auditionKeyArmed, src->auditionKeyArmed, sizeof(dst->auditionKeyArmed));
     memcpy(dst->auditionNoteActive, src->auditionNoteActive, sizeof(dst->auditionNoteActive));
     for (int v = 0; v < 8; ++v) {
         dst->buf[v] = NULL;
@@ -410,8 +421,8 @@ static inline void synth_clip_process_frames_halo(const Clip* c, SynthHaloState*
     (void)n;
     if (!st->initialized) {
         voice_manager_init(&st->vm, (double)SAMPLE_RATE);
-        st->auditionActivePitch = -1;
-        st->auditionVoice = NULL;
+        for (int i = 0; i < 8; ++i) st->auditionKeyPitch[i] = -1;
+        for (int i = 0; i < 8; ++i) st->auditionKeyVoice[i] = NULL;
         st->initialized = true;
     }
 
@@ -534,6 +545,14 @@ static inline void synth_clip_process_frames_quadrum(const Clip* c, SynthQuadrum
             // A failed roll still marks the note active so it won't re-roll.
             if (!rngState || track_roll_probability(rngState, triggerProb)) {
                 if (st->buf[voice] && st->len[voice] > 0) {
+                    // Note velocity scales the one-shot transient: normalize
+                    // MIDI-style 0-100 velocities (or a 0-1 value) and map
+                    // through the app's standard velocity gain curve, matching
+                    // how sample/SF2 notes and the Halo engine treat velocity.
+                    float vel = (nt->velocity > 1.0f) ? (nt->velocity / 100.0f) : nt->velocity;
+                    if (vel < 0.0f) vel = 0.0f;
+                    if (vel > 1.0f) vel = 1.0f;
+                    st->vel[voice] = midi_velocity_gain(vel);
                     st->pos[voice] = 0;
                     st->playing[voice] = true;
                 }
@@ -549,10 +568,11 @@ static inline void synth_clip_process_frames_quadrum(const Clip* c, SynthQuadrum
 static inline void mix_quadrum_active(SynthQuadrumState* st, float* L, float* R, int frames) {
     for (int v = 0; v < 8; ++v) {
         if (!st->playing[v] || !st->buf[v] || st->len[v] <= 0) continue;
+        float g = st->vel[v];
         for (int f = 0; f < frames; ++f) {
             int p = st->pos[v];
             if (p >= st->len[v]) { st->playing[v] = false; break; }
-            float s = st->buf[v][p];
+            float s = st->buf[v][p] * g;
             L[f] += s; R[f] += s;
             st->pos[v] = p + 1;
         }
@@ -589,26 +609,28 @@ static inline bool synth_editor_has_ringing(int clipIdx) {
 }
 
 // Editor audition: render one frame for the currently-edited synth clip.
-// keyNote/keyHeld drive the piano-roll key click (Halo: a held note; Quadrum:
-// a triggered voice 0-7). The PLAY loop scans the clip's notes at localBeat,
-// mirroring the timeline. The audio thread never calls quadrum_render here —
-// it only plays back the pre-rendered cached transients. Uses the same per-clip
-// engine state as timeline playback, so key clicks and PLAY are heard.
+// heldKeys/heldKeyCount drive the keyboard audition (up to 8 held keys; Halo:
+// sustained notes, Quadrum: triggered voices 0-7). The PLAY loop scans the
+// clip's notes at localBeat, mirroring the timeline. The audio thread never
+// calls quadrum_render here — it only plays back the pre-rendered cached
+// transients. Uses the same per-clip engine state as timeline playback, so
+// key clicks and PLAY are heard.
 static inline void synth_editor_process_preview(const Clip* c, int clipIdx,
                                                 float* L, float* R,
-                                                int keyNote, bool keyHeld,
+                                                const int* heldKeys, int heldKeyCount,
                                                 float localBeat, bool playLoop,
                                                 float fpb) {
     (void)fpb;
     if (!c) return;
+    if (heldKeyCount > MIDI_KB_MAX) heldKeyCount = MIDI_KB_MAX;
     // Runs under seq_lock, so reading g_Seq.swing is safe.
     const float swing = g_Seq.swing;
     if (c->clipKind == CLIP_KIND_HALO) {
         SynthHaloState* st = &g_ClipHalo[clipIdx];
         if (!st->initialized) {
             voice_manager_init(&st->vm, (double)SAMPLE_RATE);
-            st->auditionActivePitch = -1;
-            st->auditionVoice = NULL;
+            for (int i = 0; i < 8; ++i) st->auditionKeyPitch[i] = -1;
+            for (int i = 0; i < 8; ++i) st->auditionKeyVoice[i] = NULL;
             st->initialized = true;
         }
         HaloPatch patch = c->haloPatch;
@@ -617,25 +639,39 @@ static inline void synth_editor_process_preview(const Clip* c, int clipIdx,
         if (patch.amp_attack  < 0.002) patch.amp_attack  = 0.002;
         if (patch.amp_release < 0.020) patch.amp_release = 0.020;
 
-        // Key-click audition. Dedicated auditionActivePitch + cached voice so
-        // dragging across keys releases the previous voice directly (no
-        // re-entering the allocator → no pop) and release always releases it.
-        if (keyHeld) {
-            if (keyNote > 0 && keyNote != st->auditionActivePitch) {
-                if (st->auditionVoice) {
-                    voice_note_off(st->auditionVoice);
-                    st->auditionVoice = NULL;
-                }
-                HaloVoice* v = voice_manager_alloc(&st->vm, keyNote);
-                if (v) voice_note_on(v, keyNote, 0.8f, (double)SAMPLE_RATE, &patch);
-                st->auditionActivePitch = keyNote;
-                st->auditionVoice = v;
+        // Keyboard audition: sync the held-key voices with the held set.
+        // Note-offs release the cached voice directly (no re-entering the
+        // allocator → no pop); note-ons allocate a fresh voice per key so up
+        // to 8 notes sound simultaneously.
+        for (int i = 0; i < 8; ++i) {
+            if (!st->auditionKeyVoice[i]) continue;
+            bool still = false;
+            for (int h = 0; h < heldKeyCount; ++h) {
+                if (heldKeys[h] == st->auditionKeyPitch[i]) { still = true; break; }
             }
-        } else {
-            if (st->auditionVoice) {
-                voice_note_off(st->auditionVoice);
-                st->auditionVoice = NULL;
-                st->auditionActivePitch = -1;
+            if (!still) {
+                voice_note_off(st->auditionKeyVoice[i]);
+                st->auditionKeyVoice[i] = NULL;
+                st->auditionKeyPitch[i] = -1;
+            }
+        }
+        for (int h = 0; h < heldKeyCount; ++h) {
+            int pitch = heldKeys[h];
+            if (pitch <= 0) continue;
+            bool already = false;
+            for (int i = 0; i < 8; ++i) {
+                if (st->auditionKeyVoice[i] && st->auditionKeyPitch[i] == pitch) { already = true; break; }
+            }
+            if (already) continue;
+            for (int i = 0; i < 8; ++i) {
+                if (st->auditionKeyVoice[i]) continue;
+                HaloVoice* v = voice_manager_alloc(&st->vm, pitch);
+                if (v) {
+                    voice_note_on(v, pitch, 0.8f, (double)SAMPLE_RATE, &patch);
+                    st->auditionKeyVoice[i] = v;
+                    st->auditionKeyPitch[i] = pitch;
+                }
+                break;
             }
         }
 
@@ -675,14 +711,28 @@ static inline void synth_editor_process_preview(const Clip* c, int clipIdx,
     } else if (c->clipKind == CLIP_KIND_QUADRUM) {
         SynthQuadrumState* st = &g_ClipQuadrum[clipIdx];
 
-        // Key-click: trigger the voice on a new key (one-shot keeps ringing).
-        // Dedicated auditionActiveVoice; on release clear it AND all pad state
-        // so voices 1-7 can never stay latched.
-        if (keyHeld && keyNote >= 0 && keyNote < 8 && keyNote != st->auditionActiveVoice) {
-            if (st->buf[keyNote] && st->len[keyNote] > 0) { st->pos[keyNote] = 0; st->playing[keyNote] = true; }
-            st->auditionActiveVoice = keyNote;
-        } else if (!keyHeld) {
-            st->auditionActiveVoice = -1;
+        // Keyboard audition: trigger the one-shot voice on the rising edge
+        // of each held key (a held voice 1-7 keeps ringing, Kick keeps its
+        // tail). Keys are disarmed as soon as they leave the held set, so a
+        // new press re-triggers; keys never latch.
+        for (int h = 0; h < heldKeyCount; ++h) {
+            int v = heldKeys[h];
+            if (v < 0 || v >= 8) continue;
+            if (!st->auditionKeyArmed[v]) {
+                if (st->buf[v] && st->len[v] > 0) {
+                    st->vel[v] = 1.0f;   // pad audition = full velocity (vel 100)
+                    st->pos[v] = 0;
+                    st->playing[v] = true;
+                }
+                st->auditionKeyArmed[v] = true;
+            }
+        }
+        for (int v = 0; v < 8; ++v) {
+            bool held = false;
+            for (int h = 0; h < heldKeyCount; ++h) {
+                if (heldKeys[h] == v) { held = true; break; }
+            }
+            if (!held) st->auditionKeyArmed[v] = false;
         }
 
         // PLAY loop: scan the clip's notes using dedicated auditionNoteActive.
@@ -696,7 +746,14 @@ static inline void synth_editor_process_preview(const Clip* c, int clipIdx,
                 bool nowOn = (localBeat >= sNote && localBeat < sNote + nt->lengthBeats);
                 bool wasOn = st->auditionNoteActive[i];
                 if (nowOn && !wasOn) {
-                    if (st->buf[voice] && st->len[voice] > 0) { st->pos[voice] = 0; st->playing[voice] = true; }
+                    if (st->buf[voice] && st->len[voice] > 0) {
+                        float vel = (nt->velocity > 1.0f) ? (nt->velocity / 100.0f) : nt->velocity;
+                        if (vel < 0.0f) vel = 0.0f;
+                        if (vel > 1.0f) vel = 1.0f;
+                        st->vel[voice] = midi_velocity_gain(vel);
+                        st->pos[voice] = 0;
+                        st->playing[voice] = true;
+                    }
                 }
                 st->auditionNoteActive[i] = nowOn;
             }

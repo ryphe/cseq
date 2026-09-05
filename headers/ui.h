@@ -1579,20 +1579,28 @@ static inline bool fade_downsample_blend(HDC hdc, int x, int y, int w, int h,
     return true;
 }
 
-static inline void fade_raster_wedge_2x(int ssW, int ssH, bool isFadeIn) {
+static inline void fade_raster_wedge_2x(int ssW, int ssH, uint8_t curveType, bool isFadeIn) {
     HGDIOBJ oldBr = SelectObject(g_fadeSSDC, fade_white_brush());
     HGDIOBJ oldPen = SelectObject(g_fadeSSDC, GetStockObject(NULL_PEN));
-    POINT tri[3];
-    if (isFadeIn) {
-        tri[0] = (POINT){ 0, ssH - 1 };
-        tri[1] = (POINT){ ssW - 1, 0 };
-        tri[2] = (POINT){ ssW - 1, ssH - 1 };
-    } else {
-        tri[0] = (POINT){ ssW - 1, ssH - 1 };
-        tri[1] = (POINT){ 0, 0 };
-        tri[2] = (POINT){ 0, ssH - 1 };
+    // The wedge's top boundary must track the same envelope the curve line
+    // draws, so the low-opacity shape hugs non-linear fades with no gap.
+    // Sampled with the same rounding as fade_raster_curve_2x; gain is
+    // monotonic, so the polygon boundary never self-intersects.
+    POINT pts[513];
+    int numPts = (ssW < 512) ? ssW : 512;
+    if (numPts < 2) { SelectObject(g_fadeSSDC, oldPen); SelectObject(g_fadeSSDC, oldBr); return; }
+    for (int i = 0; i < numPts; ++i) {
+        float t = (float)i / (float)(numPts - 1);
+        float gain = compute_fade_gain(t, curveType, isFadeIn);
+        pts[i] = (POINT){ (int)(t * (float)(ssW - 1) + 0.5f),
+                          (int)((1.0f - gain) * (float)(ssH - 1) + 0.5f) };
     }
-    Polygon(g_fadeSSDC, tri, 3);
+    if (isFadeIn) {
+        pts[numPts] = (POINT){ ssW - 1, ssH - 1 };    // close down the right edge, along the bottom
+    } else {
+        pts[numPts] = (POINT){ 0, ssH - 1 };          // close along the bottom, up the left edge
+    }
+    Polygon(g_fadeSSDC, pts, numPts + 1);
     SelectObject(g_fadeSSDC, oldPen);
     SelectObject(g_fadeSSDC, oldBr);
 }
@@ -1626,7 +1634,7 @@ static inline bool fade_template_build(HDC hdc, FadeCurveTpl* t, int w, int h,
     const int ssW = w * 2, ssH = h * 2;
 
     fade_clear_ss(w, h);
-    fade_raster_wedge_2x(ssW, ssH, isFadeIn);
+    fade_raster_wedge_2x(ssW, ssH, curveType, isFadeIn);
     fade_downsample_cov(buf, w, h, CSEQ_FADE_WEDGE_ALPHA / CSEQ_FADE_CURVE_ALPHA);
 
     fade_clear_ss(w, h);
@@ -3809,6 +3817,10 @@ static inline void render_ui(HDC hdc, const RECT *clientRect) {
 
      
     int mX = zX + ctrlW + gap;
+    g_masterVolBtnRect.left   = mX;
+    g_masterVolBtnRect.top    = dockY;
+    g_masterVolBtnRect.right  = mX + ctrlW;
+    g_masterVolBtnRect.bottom = dockY + dockH;
     bool isMH = (g_Seq.mouseX >= mX && g_Seq.mouseX <= mX + ctrlW &&
                  g_Seq.mouseY >= dockY && g_Seq.mouseY <= dockY + dockH);
     char mVal[8]; snprintf(mVal, sizeof(mVal), "%d", (int)(g_Seq.masterVolume * 100.0f + 0.5f));

@@ -108,21 +108,30 @@ typedef struct {
 #define CSQ_ADSR_MAGIC   "CSQA"
 #define CSQ_ADSR_VERSION 1
 
- 
+
 typedef struct {
     char    magic[4];           
     int32_t version;            
     int32_t trackCount;
 } CSQFxSection;
 
+#define CSQ_FX_MAGIC          "CSQE"
+#define CSQ_FX_VERSION_LEGACY 1
+#define CSQ_FX_VERSION        2
+
+// Legacy CSQ1-4 struct (fixed 8 slots) to read older project files cleanly
+typedef struct {
+    int32_t count;                                  
+    int32_t slots[8];                    
+    float   params[8][FX_MAX_PARAMS];    
+} CSQFxChainV1;
+
+// Current struct (uses the active FX_MAX_SLOTS)
 typedef struct {
     int32_t count;                                  
     int32_t slots[FX_MAX_SLOTS];                    
     float   params[FX_MAX_SLOTS][FX_MAX_PARAMS];    
 } CSQFxChain;
-
-#define CSQ_FX_MAGIC   "CSQE"
-#define CSQ_FX_VERSION 1
 
 // --- SoundFont External Reference Section (trailing, optional) ---
 // Stores only path descriptors + preset selection; .sf2 data is never embedded.

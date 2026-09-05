@@ -888,7 +888,7 @@ static void media_paint(HDC hdc, const RECT* rc) {
         int upOffset = hasUp ? 1 : 0;
         for (int i = 0; i < dirCount; ++i) {
             int visRow = i + upOffset - g_mediaDirScroll;
-            if (visRow < 0) continue;
+            if (visRow < upOffset) continue; // folders are only rendered at visRow >= 1, leaving visual row 0 visible as [..] Up
             if (visRow >= L.leftVisible) break;
             MediaEntry* e = &entries[i];
             RECT rRc = { L.leftPane.left + 2, L.leftPane.top + 2 + visRow * L.rowH,
@@ -1155,18 +1155,17 @@ static LRESULT CALLBACK MediaExplorerWndProc(HWND hwnd, UINT msg, WPARAM wParam,
             return 0;
         }
 
-    // Left pane: pure directory browser.
+        // Left pane: directory browser.
         if (mx >= L.leftPane.left && mx <= L.leftPane.right && my >= L.leftPane.top && my <= L.leftPane.bottom) {
             int row = (my - L.leftPane.top - 2) / L.rowH;
             int visRow = row;
             if (visRow >= 0 && visRow < L.leftVisible) {
-                int listRow = visRow + g_mediaDirScroll;
                 bool hasUp = (g_mediaCurDir[0] != '\0');
-                if (hasUp && listRow == 0) {
-                    // Clicked "[..] Up"
+                if (hasUp && visRow == 0) {
+                    // Clicked "[..] Up" (always pinned to visual row 0)
                     media_navigate_up();
                 } else {
-                    int folderIdx = hasUp ? (listRow - 1) : listRow;
+                    int folderIdx = g_mediaDirScroll + (hasUp ? (visRow - 1) : visRow);
                     if (folderIdx >= 0 && folderIdx < g_mediaDirCount) {
                         MediaEntry* e = &g_mediaEntries[folderIdx];
                         media_set_cur_dir(e->path);
@@ -1288,6 +1287,28 @@ static LRESULT CALLBACK MediaExplorerWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         return 0;
     }
 
+    case WM_RBUTTONDOWN: {
+        // Right-click on a knob resets it to the factory default.
+        int mx = GET_X_LPARAM(lParam), my = GET_Y_LPARAM(lParam);
+        RECT rc; GetClientRect(hwnd, &rc);
+        MediaLayout L; media_compute_layout(&rc, &L);
+        if (mx >= L.speedCell.left && mx <= L.speedCell.right &&
+            my >= L.bottomPane.top && my <= L.bottomPane.bottom) {
+            g_mediaSpeed = AUDITION_SPEED_DEFAULT;
+            audition_set_speed(g_mediaSpeed);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+        if (mx >= L.volCell.left && mx <= L.volCell.right &&
+            my >= L.bottomPane.top && my <= L.bottomPane.bottom) {
+            g_mediaVolume = AUDITION_VOLUME_DEFAULT;
+            audition_set_volume(g_mediaVolume);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+        return 0;
+    }
+
     case WM_MOUSEWHEEL: {
         int zDelta = GET_WHEEL_DELTA_WPARAM(wParam);
         POINT pt; GetCursorPos(&pt); ScreenToClient(hwnd, &pt);
@@ -1326,6 +1347,8 @@ static LRESULT CALLBACK MediaExplorerWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         } else if (pt.x >= L.leftPane.left && pt.x <= L.leftPane.right) {
             int step = (zDelta > 0) ? -1 : 1;
             g_mediaDirScroll += step;
+            // Clamp maximum scroll
+            if (g_mediaDirScroll > g_mediaDirCount - 1) g_mediaDirScroll = g_mediaDirCount - 1;
             if (g_mediaDirScroll < 0) g_mediaDirScroll = 0;
             InvalidateRect(hwnd, NULL, FALSE);
         }

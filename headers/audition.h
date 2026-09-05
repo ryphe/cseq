@@ -29,6 +29,8 @@
 #define AUDITION_FADE_FRAMES 66            // ~1.5 ms declick ramp at 44.1 kHz
                                            // (fast so pausing leaves no audible
                                            //  trail)
+#define AUDITION_VOLUME_DEFAULT 0.75f      // default audition output level (75%)
+#define AUDITION_SPEED_DEFAULT  1.0f       // default preview speed (1×)
 
 // Two pre-allocated ping-pong buffers. Static arrays (no malloc), zero-filled.
 static float g_audBuf[2][AUDITION_MAX_FRAMES * 2];

@@ -1,4 +1,4 @@
-# cseq — Architecture & Design Guide (1.2)
+# cseq — Architecture & Design Guide (1.3)
 
 This is the authoritative reference for how the engine is built, how it threads, how memory is owned, and how to extend it without breaking real-time safety.
 
@@ -165,7 +165,12 @@ g_Seq.lock  →  g_midiLock        (audio callback chunk -> MIDI preview; MIDI p
   `g_Seq.lock`, so the order is `g_Seq.lock → g_midiLock`. Nothing acquires
   `g_midiLock` and then `g_Seq.lock` while holding it (the callback's "ringing
   check" releases `midi_lock` before taking `seq_lock`), so the two never
-  deadlock. Do not add a `g_midiLock → g_Seq.lock` nesting anywhere.
+  deadlock. Do not add a `g_midiLock → g_Seq.lock` nesting anywhere. One level
+  deeper: the preview's standard-roll audition slots resolve SoundFont notes
+  (`sfont_get_sample`) *while holding* `g_midiLock`, so the full chain there is
+  `g_Seq.lock → g_midiLock → g_SFont.lock`. Nothing acquires those locks in
+  reverse (the UI thread takes `g_midiLock` alone for held-set updates), so the
+  hierarchy stays acyclic.
 - **Rule:** never hold a lock across a blocking call (file I/O, `malloc`,
   `MessageBox`, `WaitForSingleObject`). Workers snapshot under `seq_lock()`
   and do I/O *after* releasing it.
@@ -251,6 +256,12 @@ primitives** and **single-producer/single-consumer rings**:
   (split, trim, pitch, zero-crossing) mutates only `Clip` metadata. This
   invariant is what lets the peak-build thread and the disk-backed PCM cache
   (see below) run safely against a shared buffer.
+- **Reversing preserves immutability & zero-copy.** Reversing a clip never
+  mutates the underlying `AudioSample` in place (which would silently corrupt
+  other clips or slices sharing that sample). Instead, it performs a
+  content-addressed transform (§5.5) creating a reversed `AudioSample` in the
+  cache, and remaps the clip's `sampleOffsetFrames`. Multiple clips/slices
+  referencing the reversed audio share the same reversed buffer zero-copy.
 - **Disk-backed PCM cache.** Since PCM is immutable, decoded audio may live in
   a content-addressed, memory-mapped cache file (`headers/samplecache.h`)
   instead of heap. `pFrames` points into the mapping (`hCacheMap` set); the OS
@@ -306,7 +317,13 @@ primitives** and **single-producer/single-consumer rings**:
   allocator, which would reset phase/filter state and cause a pop.
 - **Quadrum (drum synth):** 8 fixed voices, each with a pre-rendered transient
   buffer. Voices are triggered by index; the audio thread only *plays back*
-  the cached transient (`mix_quadrum_active`), never re-renders it live.
+  the cached transient (`mix_quadrum_active`), never re-renders it live. The
+  triggering note's velocity is honored exactly like the sample/SF2 and Halo
+  paths: the trigger normalizes the note velocity and caches
+  `midi_velocity_gain(vel)` into the per-voice `vel[8]` gain, and the mixer
+  scales the one-shot transient sample-wise with it — so velocity edits made
+  on the piano roll are audible in both timeline playback and the in-window
+  audition preview.
 - **Granular:** a pool of `GRAN_MAX_GRAINS` grains; a spawn claims an inactive
   grain, or **chokes** the oldest grain (highest `phase`) when full.
 
@@ -460,6 +477,9 @@ committed**: they preview live and only write real state on `[APPLY]` / `ENTER`;
 `ESC` / click-outside / `[CANCEL]` discards. §5.3 documents the piano-roll MIDI
 clip source model (sample vs. SoundFont) and its dynamic clip naming. §5.4
 documents how Shift+Wheel rate changes are debounced into their own undo step.
+§5.5 documents sample clip reversing (single & batch) via content-addressed
+transforms. §5.6 documents the piano-roll octave wheel and the VK-keyed
+keyboard audition set.
 
 ### 5.1 Track-Level Trigger Probability
 
@@ -697,6 +717,176 @@ the subsequent drag pushes a clean, separate undo state. The whole mechanism
 adds no extra timers or locks — it reuses the existing 16 ms `WM_TIMER` slot
 and the existing `seq_lock()`.
 
+### 5.5 Sample Clip Reversing (Single & Batch)
+
+**Purpose.** Right-click a sample clip → **"Reverse"** (single) or
+**"Batch Reverse... (`[N] clips`)"** (multi) reverses the audio playback of the
+targeted clip(s). Unlike Transient Slicing (§5.2, which presents an interactive
+sensitivity slider dialog with scrubbing overlay lines), Reversing is a binary
+deterministic operation that commits immediately upon click under `seq_lock()`
+and the undo pipeline.
+
+**Guard & Context Menu Integration.** Defined in `headers/dialogs.h`
+(`show_clip_context_menu`), following the exact eligibility guard as Slicing:
+```c
+// Shown only when:
+// - !g_Seq.isBusy
+// - every target clip is non-MIDI, sampleIndex >= 0, valid loaded PCM
+```
+If any target fails (e.g. MIDI clip, unassigned sample, or empty buffer), the
+reverse items are omitted from the context menu. Menu command ID `ID_CLIP_REVERSE`
+(`headers/config.h:116`) dispatches directly to `reverse_clips_action`.
+
+**Architectural Decision: Content-Addressed Transform vs. Real-Time Playback Branch.**
+A naive implementation might add a boolean `isReversed` flag to `Clip` and
+modify the audio mixing callback (`render_frames` in `audio.h`) to step backward
+through `pFrames`. That approach was rejected for four critical architectural reasons:
+1. **Real-time hot path pollution:** branching `render_frames` for backward
+   streaming complicates linear interpolation, SIMD summing paths, and sample-loop
+   wrapping logic (the $\ge 2\times$ length loop policy wraps back to frame 0, which
+   in reverse would need to wrap to `frameCount - 1`).
+2. **Cross-cutting interactions:** backward playback would require special-cased
+   handling in fade curves, ADSR envelopes, alt-slip dragging, and granular
+   engines (`g_ClipGran`).
+3. **Export bit-parity:** live playback and WAV export share the exact same
+   `render_frames` loop; altering the playback loop risks divergence between live
+   rendering and offline export.
+4. **Hard Rule 1–3 preservation:** by pushing all transform complexity to the UI/edit
+   thread and leaving the audio callback reading PCM strictly forward from
+   `sampleOffsetFrames`, the real-time thread remains allocation-free, lock-minimal,
+   and deterministic.
+
+Reversing is therefore implemented as a **content-addressed sample transform**:
+the edit thread produces a reversed sample buffer, installs it into the sample pool
+and disk cache, and reassigns the clip's `sampleIndex`.
+
+**Core Pipeline & Content Dedup** (`get_or_create_reversed_sample`, `actions.h`):
+1. **PCM buffer reversal:** a temporary stereo buffer (`frameCount * 2 * sizeof(float)`)
+   is allocated and populated with the reversed interleaved channels:
+   `revPcm[i * 2 + ch] = srcPcm[(frameCount - 1 - i) * 2 + ch]`.
+2. **64-bit FNV-1a hashing:** hashed using `sample_hash_pcm`.
+3. **Lossless dedup lookup:** `g_Seq.samples` is scanned for an existing loaded
+   sample with matching `frameCount` and `contentHash`:
+   - **Reversing back to original:** reversing an already-reversed sample produces
+     PCM identical to the original forward sample. Dedup matches the original
+     sample's hash and returns its existing `sampleIndex` without adding any new
+     entry to `g_Seq.samples` or disk.
+   - **Shared reversed instances:** if multiple clips or batches reverse the same
+     source sound, the existing reversed `sampleIndex` is reused.
+   - **Hard Rule 4 zero-copy guarantee:** slices and clips referencing the same
+     reversed sample share its buffer without duplicating PCM.
+4. **Cache registration:** if new, the buffer is stored in the memory-mapped disk
+   cache via `sample_install_cached` (`%LOCALAPPDATA%\cseq\cache\<hash>.pcm`),
+   assigned a suffixed display name (`"kick.wav (reversed)"`), and its LOD peak
+   pyramid is built synchronously via `generate_peak_cache_auto` so waveform
+   drawing renders immediately.
+
+**Frame-Offset Remapping Math** (`reverse_remap_clip_offset`, `actions.h`):
+Because `sampleOffsetFrames` is relative to the start of the buffer, reversing the
+buffer requires remapping the clip's playback window:
+
+$$\text{newOffset} = \text{frameCount} - \text{sampleOffsetFrames} - \text{clipFrameLength}$$
+
+Key mathematical details (the "corrections to the naive spec"):
+- **Rate-scaled frame length:** converting clip duration from timeline beats to
+  buffer frames scales by playback rate in the numerator:
+  $$\text{spanFrames} = \text{lengthBeats} \times \text{fpb} \times \text{playbackRate}$$
+  (This is the exact inverse of Slicing's frame-to-beat formula in §5.2, where
+  `playbackRate` sits in the denominator: `beats = frames / (fpb * playbackRate)`).
+- **Available-frame boundary clamp:** `clipFrameLength` is clamped to
+  `frameCount - sampleOffsetFrames`. If a clip reaches or extends past the buffer
+  end, this clamp prevents unsigned integer underflow and clamps `newOffset` to 0.
+- **Zero-crossing snap omission:** unlike Slicing and splitting (which snap cuts to
+  nearest zero-crossings to eliminate boundary transients), `reverse_remap_clip_offset`
+  intentionally does **not** snap to zero crossings. Snapping on reverse would cause
+  subtle phase drift across successive reverse/un-reverse operations. Without snapping,
+  remapping is **strictly symmetric and invertible**:
+  $$\text{remap}(\text{remap}(\text{offset})) \equiv \text{offset}$$
+  Toggling reverse back and forth is 100% mathematically lossless.
+
+**Batch Execution Path** (`reverse_clips_action`, `actions.h`):
+Iterates all target clips and memoizes source transformations in `remapSample[MAX_SAMPLES]`:
+- Unique source samples are reversed and hashed **once per batch**, not once per clip.
+- Each clip's `sampleOffsetFrames` is individually remapped around its source buffer.
+- `g_ClipGran[cIdx].sampleIndex` is kept in sync for clips with granular mode enabled.
+- All target bars are marked dirty (`mark_clip_bars_dirty`).
+
+**Commit, Undo & Redraw Pipeline:**
+```c
+push_undo_state();
+seq_lock();
+// remap offsets, update sampleIndex, sync granular engines
+seq_unlock();
+cseq_clip_structure_changed();
+invalidate_timeline_cache();
+InvalidateRect(g_hWnd, NULL, FALSE);
+```
+- `push_undo_state()` captures the pre-reversed state so `Ctrl+Z` immediately restores
+  the original sample indices and offsets.
+- `cseq_clip_structure_changed()` rebuilds the timeline bar grids and track masks.
+- `invalidate_timeline_cache()` flushes cached waveform bitmaps and fade templates
+  so the reversed waveform renders on the very next paint pass.
+- **Audio-thread impact: zero.** No locks held across audio processing, no memory
+  allocations on the audio thread, and no changes to `render_frames`.
+
+### 5.6 Piano-roll octave wheel & the VK-keyed keyboard audition set
+
+**Purpose.** Two refinements to the piano rolls (the MIDI/synth editor
+`MidiEditorWndProc`, `dialogs.h:5848`, and the granular editor `GranWndProc`,
+`granular.h:632`): the **Octave button** takes the scroll wheel, and the
+QWERTY keyboard audition set is keyed by the **physical key** so an octave
+change mid-hold can never strand a sounding note.
+
+**Octave wheel.** Wheeling over the Octave button shifts the roll one octave
+per notch — up = one octave up, down = one down — clamped to ±3, exactly like
+the existing left/right-click handlers. In the MIDI roll it is the
+`WM_MOUSEWHEEL` octave block (`dialogs.h:6010`), checked after the ADSR-knob
+hover step and skipped for Quadrum (fixed voices); the granular roll gains a
+new `WM_MOUSEWHEEL` case in `GranWndProc` (`granular.h:1578`) — it previously
+had no wheel handling at all, and unhandled wheel positions fall through to
+`DefWindowProc`. Hit rects mirror the draw pass exactly:
+`{scale_x(106) .. scale_x(210) × h-scale_y(26) .. +scale_y(20)}` for the MIDI
+roll and `{106 .. 206 × h-26 .. h-26+20}` for granular (that window lays out
+in raw pixels).
+
+**Why pitch-keyed key-up was broken.** The polyphonic keyboard audition set
+(`kbHeldNotes[]`, up to `MIDI_KB_MAX` = 8) stored the pitch resolved at press
+time, but `WM_KEYUP` re-resolved the pitch against the *current* octave and
+removed by pitch. An octave change while a key was held made the key-up miss:
+the orphaned entry kept republishing its pitch through
+`midi_audition_rebuild_poly()` / `gran_audition_rebuild()`, the audio-side
+audition slot never saw a release (its "still held" check matches by pitch),
+and the note rang until some later key-up happened to re-resolve to the stuck
+pitch (octave back, then release) or an explicit clear ran (ESC, close,
+Keyboard toggle, editor open). Re-pressing the same key did not help —
+`kb_add` deduplicated by pitch, so the new octave's entry was simply added
+alongside the orphan.
+
+**The fix: key entries by the physical key (VK).** `MidiEditContext` and
+`GranularEngine` each carry a parallel `kbHeldVKs[MIDI_KB_MAX]` array
+(`types.h:749` / `types.h:238`). `midi_audition_kb_add(vk, pitch)` /
+`midi_audition_kb_remove(vk)` (`types.h:814`, under `midi_lock`) and
+`gran_audition_kb_add(e, vk, pitch)` / `gran_audition_kb_remove(e, vk)`
+(`types.h:877`, under `seq_lock`) dedupe, evict and match by VK; the
+`WM_KEYUP` handlers pass `(int)wParam` and resolve no pitch (the
+`pr_key_to_semitone` check survives only as the "is this an audition key"
+gate). Consequences:
+
+- An octave change (wheel or click) while holding keys is safe by
+  construction: held notes keep sounding at their press-time pitch and
+  release on the physical key-up.
+- Keys that collapse onto one voice (Quadrum's `semi % 8`: 'A' and 'K' both
+  map voice 0) now track independently — releasing one keeps the voice while
+  the other is down. The union published to the audio thread
+  (`auditionNotes[]`) still deduplicates pitches.
+- The mouse strip needed nothing: `WM_LBUTTONUP` unconditionally calls
+  `midi_audition_set_mouse(-1)` / `gran_audition_set_mouse(e, -1)`, so it
+  can never strand an entry.
+
+Snapshot/serialization impact: none — the granular engine snapshot already
+zeroes `kbHeldCount` on restore (`state.h:128`) and audition state is never
+persisted.
+
 ---
 
 ## 6. The FNV Hash Tree & the Double-Buffered GDI Pipeline
@@ -728,7 +918,7 @@ Every hash starts from the FNV-1a offset basis `2166136261u`. Floats are
 folded by copying their bits into a `DWORD` (via `memcpy`, never a cast) so
 `-0.0`/`+0.0` and subnormals hash consistently with their raw representation.
 A separate 64-bit FNV-1a (`sample_hash_pcm`, `headers/samplecache.h:24`) hashes
-raw PCM bytes for the content-addressed sample cache; see §6.4.
+raw PCM bytes for the content-addressed sample cache; see §6.5.
 
 ### 6.2 The timeline hash tree (a Merkle-style accumulator)
 
@@ -836,7 +1026,51 @@ repaint path exhausts GDI handles over time. `shutdown_render_surfaces`
 (`ui.h:2347`) and the synth editor's `WM_DESTROY` tear all of these down
 cleanly.
 
-### 6.4 Content-addressed sample cache (FNV-1a 64)
+### 6.4 Drawing rule: shapes that share a boundary with a curve must derive from the same evaluation
+
+The fade overlays in `headers/ui.h` are a reusable example of a general drawing
+rule in this codebase: **whenever a filled shape's boundary is supposed to
+coincide with a curve you also draw, build the shape from the *same* analytic
+evaluation the curve uses — never approximate the shared edge with a straight
+segment.**
+
+Fade rendering (`ui.h:1427-1818`) is supersampled into a cached alpha template
+keyed by `(w, h, curveType, isFadeIn)` (`fade_template_get`/`g_fadeTpls`,
+`ui.h:1645`), so the shape is rasterized once per size/curve and reused across
+clips. Two passes write into that template:
+
+- `fade_raster_curve_2x` (`ui.h:1608`) draws the bright envelope **line** by
+  sampling `compute_fade_gain(t, curveType, isFadeIn)` (`dsp.h:63`).
+- `fade_raster_wedge_2x` (`ui.h:1582`) draws the low-opacity **wedge** beneath
+  it, whose top edge is the envelope.
+
+The invariant: the wedge's top edge must land exactly on the curve line, so the
+fill hugs the envelope with no gap. For non-linear fades (exp/smooth/log) the
+envelope bows away from a straight diagonal, so the wedge boundary must be
+sampled with the **same** `compute_fade_gain` calls **and the same rounding**
+as the line pass. `fade_raster_wedge_2x` therefore builds a polygon from
+`compute_fade_gain` with the identical `(int)(t*(ssW-1)+0.5f)` /
+`(int)((1.0f-gain)*(ssH-1)+0.5f)` rounding, then closes along the bottom. Gain
+is monotonic in `t`, so the polygon boundary never self-intersects. Linear
+fades degenerate to the original triangle, so the straight-line shortcut is
+still the correct special case — the rule is to derive the shared edge from the
+curve, not to hard-code a shape that happens to match linear only.
+
+Two practical consequences worth keeping:
+
+1. **Never hand-draw the shared edge** (a `Polygon` triangle with a straight
+   hypotenuse) for a boundary that must match an analytic curve. Reuse the
+   curve evaluation.
+2. **Match rounding exactly.** A shape that samples the same function but with
+   different pixel rounding will still leave a visible seam against the line.
+   Keep the two passes' `t → pixel` mapping identical.
+
+`tests/fade_wedge_verify.c` (+ `fade_wedge_verify.bat`) extracts the real
+`config.h` fade enum, `dsp.h` `compute_fade_gain`, and `ui.h` fade-template
+block verbatim and asserts the wedge reaches the curve line in every pixel
+column for all curve types — the regression guard for this rule.
+
+### 6.5 Content-addressed sample cache (FNV-1a 64)
 
 The disk-backed PCM cache (`headers/samplecache.h`) is named by a **64-bit
 FNV-1a hash of the raw decoded PCM bytes** (`sample_hash_pcm`): the file name
@@ -848,16 +1082,54 @@ pressure instead of the app holding the full buffer resident. The realtime
 audio thread only dereferences `pFrames[i]` as plain memory reads; only the
 load thread touches disk.
 
-### 6.5 The synth / MIDI preview lifecycle
+### 6.6 The synth / MIDI preview lifecycle
 
-The piano roll (`MidiEditorWndProc`, `dialogs.h:5751`) hosts an **in-window
+The piano roll (`MidiEditorWndProc`, `dialogs.h:5848`) hosts an **in-window
 audition** that plays the current clip through the same engine the timeline
 uses. For synth-module clips (Halo/Quadrum) the preview drives the per-clip
 voice state (`g_ClipHalo`/`g_ClipQuadrum`) in `midi_editor_process_preview`
-(`audio.h:455`); for sample/SF2 MIDI clips it renders the clicked note or a
-looping playhead. The audio thread renders the preview only while the
-audition flags are set (`auditionHeld` or `isAuditionPlaying`), so clearing
-them is what actually silences it.
+(`audio.h:447`). For standard sample/SF2 MIDI clips it renders two voice
+families, both shaped by the clip's ADSR knobs through the same
+`midi_adsr_gain` / `midi_adsr_level_at` primitives the timeline's
+`midi_process_clip_frames` voices use:
+
+- **Audition slots.** 8 static `AudSlot`s (`audio.h:575`), one per held key
+  from the shared held-set (mouse strip + QWERTY, §5.6), all under
+  `midi_lock`. While held, a slot runs A→D→S (`envLen` pinned to
+  `kHeldLen`) and settles on the Sustain knob; on key-up `envLen` freezes at
+  the current frame (`audio.h:589`), so the release tail fades over the
+  Release knob's time from the exact level-at-release (gain-continuous at
+  the freeze frame). Slots retire only once the tail has fully died
+  (`audio.h:628-637`), and a sustain-0 held key stays allocated (silent)
+  instead of being recycled. Mouse-strip glide retrigger-attacks the new
+  pitch (fresh slot, `envFrame = 0`) while the old pitch freezes into its
+  tail. Attack/Release knobs of 0 are floored at 2 ms in the audition
+  (de-click); the timeline path uses exact 0, so the two differ only at
+  knob-0 settings. Minor edge case: gliding back onto a pitch whose slot is
+  still mid-tail reuses that slot, so the tail keeps fading instead of
+  retriggering.
+- **[PLAY]-loop voices** (`s_ring`): notes scanned at the looping playhead
+  mirror the timeline envelopes and keep ringing through their release tail
+  past the written note end (`relUntil`), with tails dropped on loop wrap.
+
+The audio thread renders the preview only while the audition flags are set
+(`auditionHeld` or `isAuditionPlaying`), so clearing them is what actually
+silences it.
+
+**Known gap: the last release tail is truncated.** A slot's tail renders
+only while the preview keeps running. When the *final* held key is released
+(or PLAY stops), `auditionHeld`/`isAuditionPlaying` drop, the callback's
+keep-alive check consults only `synth_editor_has_ringing` — a Halo/Quadrum
+engine check that returns false for standard MIDI clips (`synth.h:588-608`)
+— and `midi_editor_process_preview` early-outs on `!playLoop && !audHeld`
+(`audio.h:522`), so the tail of the last key is cut to the ~6 ms master fade
+(`kRampStep` = 1/256 per frame) instead of the Release knob's time. Tails
+while other keys remain held are unaffected. Lifting this means keeping the
+preview alive while any audition slot is still keyed — the slot table is a
+function-local static under `midi_lock`, so the gate cannot see it today.
+`tests/adsr_verify.c` pins the shared envelope shape numerically (A/D/S
+levels, release-from-level-at-release, sustain-0 semantics, freeze-frame
+continuity).
 
 **Playhead repaint is independent of knob edits.** The playhead is a *dynamic
 overlay* drawn on top of the cached piano-roll bitmap each frame and repainted
@@ -868,14 +1140,26 @@ UI thread, which is why the knob-drag path must stay cheap (see §6.3) — it
 must not delay the piano roll's timer and stall the playhead.
 
 **Stopping a preview on close.** Closing the piano roll via the title-bar X
-hides the window (`WM_CLOSE`, `dialogs.h:6770`) rather than destroying it, so
+hides the window (`WM_CLOSE`, `dialogs.h:6982`) rather than destroying it, so
 `WM_DESTROY` (which clears the audition flags) never runs on a normal close.
 `WM_CLOSE` therefore clears the audition state itself — under `midi_lock()`
-it zeroes `auditionNote`, `auditionHeld`, and `isAuditionPlaying` before
-hiding — so a Halo/Quadrum/MIDI preview stops cleanly instead of looping in
-the master bus while the user works elsewhere. The ESC key path
-(`dialogs.h:6669`) clears the same flags, and `WM_DESTROY` still clears them
-as a safety net for the destroy case.
+it empties the polyphonic held-set (`midi_audition_clear_poly`, which zeroes
+`kbHeldCount`/`mousePitch` and rebuilds `auditionHeld` to false) and clears
+`isAuditionPlaying` before hiding — so a Halo/Quadrum/MIDI preview stops
+cleanly instead of looping in the master bus while the user works elsewhere.
+The ESC key path (`dialogs.h:6850`) clears the same state, and `WM_DESTROY`
+still clears it as a safety net for the destroy case.
+
+**Piano-roll note entry & hit-testing.** Click-to-add in the grid
+(`dialogs.h` WM_LBUTTONUP) snaps the pointer beat **down** to the clicked
+grid cell via `quantize_beat_floor` (`dsp.h`) — a round-half-up snap would
+push clicks in the right half of a cell one cell to the right — and clamps
+the placed note so it always sits fully inside `[0, clipLen]` with at least
+the minimum note length. Note hit-testing (`midi_edit_get_note_under_mouse`,
+`dialogs.h`) uses a ±6 px slack around the note with a minimum 8 px click
+width (short notes render at 6 px but stay grabbable), and the resize-edge
+zones are only the outer 3–4 px so the note body remains grabbable for
+moving.
 
 ---
 

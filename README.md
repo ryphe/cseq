@@ -20,8 +20,8 @@
 
 | Component | Description |
 | :--- | :--- |
-| **Audio Input** | `WAV`, `MP3`, `FLAC`, `OGG`, `M4A`, `AIFF`; SoundFont 2 (`.sf2`) in MIDI clips |
-| **Audio Output** | `44.1 kHz` `Stereo` mixdown, `WAV` export (16‑bit & 24‑bit TPDF dithered, 32‑bit float) |
+| **Audio Input** | `WAV`, `MP3`, `FLAC`, `OGG` (stb_vorbis), `M4A`, `AIFF`; SoundFont 2 (`.sf2`) banks |
+| **Audio Output** | `44.1 kHz` `Stereo` WASAPI mixdown; offline WAV export (16‑bit & 24‑bit TPDF dithered, 32‑bit float) |
 
 ---
 
@@ -29,13 +29,14 @@
 
 | Component | Description |
 | :--- | :--- |
-| **Keybinds Reference** | Press `K` or click the `[KEYBINDS]` button in the top toolbar to open a searchable reference window listing every keyboard shortcut |
-| **Timeline Canvas** | Click a clip to select it; drag to reposition. Drag left/right edges to **trim** length; hold `Alt` while dragging a clip to **slip‑edit** its internal sample offset (audio content shifts under the clip). Drag the small fade‑in/out handles (top corners) to adjust fade length. Drag a marquee (click empty space and drag) to select multiple clips; `Ctrl+Drag` a selection to **duplicate** clips in place. `Shift+Drag` a sample clip's edge to both adjust playback rate and edge position. Right‑click any clip for context menus (rate, fades, granular, slicing) |
-| **Track Headers** | Click the track number/name area to **mute** the track; `Shift+Drag` vertically to **reorder** tracks. Hover and use the **scroll wheel** to adjust track volume. Right‑click to open dedicated dialogs |
-| **Piano Roll** | Click on the note grid to **add** a note; double‑click or right‑click to **delete**. Drag a note left/right to **move** it in time; drag its right edge to **resize** its length. Scroll the mouse wheel while hovering over a note to adjust its **velocity** (0–127). The four ADSR knobs (Attack, Decay, Sustain, Release) shape the amplitude envelope of every sample or soundfont note in the clip |
-| **Media Explorer** | Browse your file system hierarchy. Click any audio file to **preview** it through the master bus (supports looped or one‑shot playback via the Repeat toggle). Use the **Import** button to add the selected file at the timeline cursor, or **drag** any file directly from the explorer onto the main canvas to place it at a precise track and beat position |
-| **FX Rack** | Drag an effect from the **modules list** (left pane) onto the **chain** (right pane) to insert it. Drag modules vertically within the chain to reorder the processing order. Right‑click a module in the chain to remove it. Click a chain slot to select it and reveal its parameters in the bottom strip, adjust with direct knob/slider drags or mouse wheel |
-| **Synth UI** | For **Quadrum** (drum synth): click the 8 voice pads (Kick, Snare, etc.) to select and audition a voice; 16 knobs below edit its parameters. For **Halo** (poly synth): select from the preset dropdown (8 factory presets) or tweak the 29 knobs across the rack. Both synth interfaces provide real‑time audition directly from the piano roll |
+| **Keybinds Reference** | Press `K` or click the `[KEYBINDS]` toolbar button to open a searchable keyboard shortcut window |
+| **Timeline Canvas** | Click to select; drag to move. Drag edges to **trim**; hold `Alt` while dragging to **slip‑edit** internal sample offset. Drag top corner handles to adjust **fade‑in/out** length. Marquee select across clips; `Ctrl+Drag` to **duplicate** in place; `Shift+Drag` an edge to stretch playback rate with boundary resizing. Right‑click for context menus (rate, slice, reverse, fades, granular) |
+| **Track Headers** | Click track name/number to toggle **mute**; click solo to isolate. `Shift+Drag` vertically to **reorder** tracks. Hover and scroll wheel to adjust track volume. Right‑click to open dedicated dialogs (Pan/Width, 3‑Band EQ, Filter Plotter) |
+| **Piano Roll** | Click grid to add a note (snaps to clicked cell); double‑click or right‑click to delete. Drag to move; drag right edge to resize duration. Hover note and use mouse wheel to set **velocity** (0–127). ADSR knobs respond to drag and hover scroll. Octave button supports click and scroll wheel (-3 to +3 octaves). QWERTY keys audition notes polyphonically with physical key-tracking |
+| **Media Explorer** | File and folder browser with background metadata decoding. Audition preview features ping‑pong memory buffers, 0.5×–2.0× speed control, loop toggle, scrubbable waveform, and ~1.5 ms de-click fades. Click **Import** or drag-and-drop audio directly onto the timeline |
+| **FX Rack** | Modular drag‑and‑drop chain hosting up to 8 serial effects per track. Drag modules from the left pool into the chain; drag vertically to reorder slots; right‑click to remove. Click a slot to reveal bottom-strip parameter controls with live knob drags and mouse wheel support |
+| **Synth UI** | **Quadrum** (drum synth): 8 clickable voice pads with 16 parameter knobs per voice and right‑click knob reset. **Halo** (poly synth): 8 factory presets dropdown and 29 rack knobs. Both synth panels support direct piano roll audition |
+| **Granular Editor** | Interactive note grid and synthesis parameters (density, size, spray, detune, pan, ADSR envelope, freeze, drone). Supports track-level or clip-level engines, QWERTY audition, and octave shifting |
 
 ---
 
@@ -43,24 +44,25 @@
 
 | Component | Description |
 | :--- | :--- |
-| **Scale & Capacity** | 128 tracks, 1024 bars, 2048 clips, 256 unique PCM buffers (shared via zero‑copy referencing), 32‑step undo/redo |
-| **Sample Editing** | Non‑destructive, zero‑copy slicing. Trim, split, and duplicate metadata only (audio never copies). Per‑clip volume, playback rate (0.01×–2.00×), slip‑edit offset, and snap‑to‑grid quantisation. Four fade curves (linear, exponential, logarithmic, smooth). Marquee selection across the main timeline and piano rolls |
-| **MIDI & Sequencing** | Full piano roll with per‑note velocity, length, and pitch editing. Built‑in **generative note sequencer** for chord/arpeggio patterns (configurable root, scale, chord type, and pattern direction). **Humanize** tool for timing, duration, and velocity variation. Per‑track **trigger probability** (0‑100%) for probabilistic sample/note triggering during playback |
-| **Granular Synthesis** | Dedicated per‑clip and per‑track granular engine. Independent density, grain size, pitch jitter, pan spread, and envelope (attack/release). Freeze and drone modes for infinite sustained textures |
-| **Quadrum Drum Synth** | 8‑voice procedural virtual‑analog drum module. Voices: Kick, Snare, Clap, Closed/Open Hat, Tom, Cowbell, Cymbal. FM, noise shaping, biquad filtering, and multi‑tap flam/spread for realistic clap burst effects |
-| **Halo Poly Synth** | 8‑voice hybrid additive/FM subtractive synth. Continuous waveform morphing (sine → triangle → square → saw), spectral tilt, unison detune with stereo spread, and analog‑style chorus ensemble. Zero‑delay TPT state‑variable filter (LP/HP/BP) with drive |
-| **SoundFont 2 Player** | Load `.sf2` banks with full preset browser and instrument selector. Pre‑rendered note cache ensures zero‑latency, deterministic playback without real‑time synthesis lock‑in, just sample‑accurate streaming |
-| **Track Tools** | Per‑track **3‑band parametric EQ** (sweepable frequency/Q, ±12 dB gain) with real‑time curve display. **Stackable filter plotter** (LP/HP/BP/Notch) with live drag‑adjustable cutoff and Q; active bands combine in series |
-| **Modular FX Rack** | Drag‑and‑drop chain of up to 8 effects per track. Modules: Gain, Buffer, Delay, Reverb, Compressor, Phaser, Chorus, Resonator, and Lo‑Fi. Direct knob/slider manipulation with visual feedback |
-| **Master Bus** | Switchable **limiter** (look‑ahead, 2 ms) or **soft‑clipper** for transparent peak control. Global **Lo‑Fi** degradation (bit depth 8–12, sample rate 8–32 kHz) over the entire mix |
-| **Visualizer** | Real‑time spectrum + oscilloscope overlay (OSC/SPEC/COMBO modes). Adjustable FFT size (256–8192), channel routing (Stereo / L / R / Mid‑Side), zoom, and colour hue. Hover for frequency/note/dB tooltips. Driven by a lock‑free audio ring |
-| **UI & Workflow** | 120 FPS GDI compositor with hash‑based dirty tracking for efficient partial redraws. Content‑addressed PCM disk cache deduplicates imported audio. **Media Explorer** with loopable preview. Full **Undo/Redo** with atomic whole‑struct snapshots. Built‑in **Keybinds** reference window |
-| **Real‑Time Core** | Audio callback is strictly allocation‑free, I/O‑free, and GUI‑free. SIMD‑accelerated track summing (AVX2/SSE2). Denormal‑hardened (FTZ/DAZ) for stable CPU usage. Heavy lifting (decode, save, export, peak‑building, SF2 pre‑render) runs on background workers so playback never stalls |
-| **Project & Export** | Versioned trailing sections ensure forward/backward compatibility across builds. Deterministic WAV export (16‑/24‑/32‑bit with TPDF dithering) using the exact same render loop as live playback. Export output is mathematically bit‑for‑bit identical to what you hear in‑session |
-| **Wine Compatible** | Since the program is mostly Win32, the Wine project allows running cseq on Linux/Mac (untested locally)
+| **Scale & Capacity** | 128 tracks, 1024 bars, 2048 clips, 256 unique PCM buffers (shared via zero‑copy referencing), 32‑step snapshot undo/redo |
+| **Sample Editing** | Non‑destructive zero‑copy slicing. Interactive transient slicing detector with sensitivity threshold and zero‑crossing snapping. Content‑addressed non‑destructive sample reversing. Per‑clip volume, playback rate (0.01×–2.00×), slip‑edit offset, snap‑to‑grid quantization, and 4 fade curves (linear, exponential, logarithmic, smooth) |
+| **MIDI & Sequencing** | Polyphonic piano roll with velocity, length, and pitch editing. Built‑in **generative note sequencer** (root, scale, chord, arpeggiator patterns, direction, octave range, seed). **Humanizer** for timing, duration, and velocity jitter. Per‑track **trigger probability** (0–100%) for generative playback |
+| **Modular FX Rack** | Up to 8 serial insert slots per track across 9 DSP modules:<br>• **Gain**: Clean level boost/cut.<br>• **Buffer**: Real‑time glitch, loop, and stutter buffer.<br>• **Delay**: Tape‑style delay with ping‑pong mode, filtering, and drive saturation.<br>• **Reverb**: Schroeder network with adjustable predelay and diffusion modulation.<br>• **Lo‑Fi**: Variable bit‑crusher (8–12 bit) and sample‑rate reduction.<br>• **Phaser**: 6‑stage allpass network driven by a quadrature LFO.<br>• **Chorus**: 4‑voice dual‑diffused bucket brigade delay (BBD) emulation.<br>• **Compressor**: Stereo‑linked feed‑forward compressor with threshold, ratio, attack, and release.<br>• **Resonator**: Zero‑delay feedback (ZDF) state‑variable filter tuned to musical pitches |
+| **Track Tools** | Per‑track **SmoothEQ3** (Airwindows 3‑band split‑filter parametric EQ with sweepable frequency, Q, and draggable visual curve). **Stackable filter plotter** (LP, HP, BP, and Notch biquad filters in series with live interactive plotting). Per‑track stereo pan and width controls |
+| **Halo Poly Synth** | 8‑voice hybrid additive/FM subtractive synth. Continuous morphing waveforms (sine → triangle → square → saw with polyBLEP anti‑aliasing), up to 12 additive partials, pink noise, and FM modulation with feedback. Zero‑delay feedback (TPT) state‑variable filter (LP/HP/BP), master chorus, and polyphony limiter |
+| **Quadrum Drum Synth** | 8‑voice procedural virtual‑analog drum synthesizer (Kick, Snare, Clap, Closed Hat, Open Hat, Tom, Cowbell, Cymbal). Dynamic pitch sweeps, FM, noise shaping, transient clicks, biquad filtering, saturation, multi‑tap clap burst/flam, and velocity‑sensitive triggering |
+| **SoundFont 2 Player** | `.sf2` loader with preset browser. Background pre‑rendered 128‑note bank cache streams deterministic PCM without real‑time synthesis CPU spikes |
+| **Master Bus** | Switchable look‑ahead peak limiter (2 ms) or soft‑clipper. Global master volume and master Lo‑Fi stage (bit depth 8–12, sample rate reduction 8–32 kHz) |
+| **Visualizer** | Real‑time oscilloscope and spectrum analyzer popup (OSC, SPEC, COMBO modes). Adjustable FFT size (256–8192), channel modes (Stereo, Mono, Left, Right, Mid‑Side), freeze frame, hue slider, and hover HUD displaying exact frequency, note pitch, and dB level. Fed via lock‑free ring buffer |
+| **UI & Workflow** | 120 FPS double‑buffered GDI compositor with Merkle hash‑tree dirty tracking and multi‑resolution LOD peak waveform cache. Anti‑aliased supersampled controls (knobs, fade curves, and rounded scrollbar thumb). Shift+Wheel playback rate change with 300 ms undo debounce |
+| **Real‑Time Core** | WASAPI audio engine. The audio callback is strictly allocation‑free, I/O‑free, and GUI‑free with FTZ/DAZ denormal protection. SIMD‑accelerated track summing (AVX2/SSE2). Dedicated background worker threads handle audio decoding, disk caching, waveform building, project serialization, and WAV export |
+| **Project & Cache** | Self‑contained `.csq` project format (CSQ4 header with versioned trailing sections for backwards/forwards compatibility) with embedded LZ77 sample compression. Content‑addressed disk PCM cache (64‑bit FNV‑1a) with 4 GB auto‑eviction cap |
+
+---
 
 ### libraries
 
-- [miniaudio](https://github.com/mackron/miniaudio)
-- [TinySoundFont](https://github.com/schellingb/TinySoundFont)
-- [Airwindows](https://github.com/airwindows/airwindows) (`SmoothEQ3`)
+- [miniaudio](https://github.com/mackron/miniaudio) (WASAPI audio I/O & file decoding)
+- [TinySoundFont](https://github.com/schellingb/TinySoundFont) (SoundFont `.sf2` parsing & pre-rendering)
+- [Airwindows](https://github.com/airwindows/airwindows) (`SmoothEQ3` parametric EQ)
+- [stb_vorbis](https://github.com/nothings/stb) (Ogg/Vorbis decoding)

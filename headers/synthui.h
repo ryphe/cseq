@@ -389,7 +389,7 @@ static inline int synth_quadrum_init_knobs(SynthKnob* knobs, QuadrumParams* p, i
     QK("resonance",   "Q",   &p->filter_q,     0.3,   8.0,   0, 2);
     QK("drive",       "x",   &p->drive,        1.0,   5.0,   0, 2);
     QK("fm ratio",    "x",   &p->fm_ratio,     0.5,   6.0,   0, 2);
-    QK("amp-decay",   "s",   &p->decay,        0.01,  1.8,   0, 3);
+    QK("decay",   "s",   &p->decay,        0.01,  1.8,   0, 3);
     QK("clap taps",   "",    &p->clap_taps,    1.0,   5.0,   1, 0);
     QK("tap spread",  "s",   &p->clap_spread,  0.005, 0.035, 0, 4);
     QK("filter type", "",    &p->filter_type,  0.0,   2.0,   1, 0);
@@ -433,10 +433,10 @@ static inline int synth_halo_init_knobs(SynthKnob* knobs, HaloPatch* p) {
     HK("filt type", "",    &p->filter_type,       0,  3,    1, 1);
     HK("lfo filt",  "Hz",  &p->lfo_filt_depth,    0,2000,   0, 0);
     HK("key track", "%",   &p->key_track,         0,  1,    0, 2);
-    HK("amp att",   "s",   &p->amp_attack,    0.002,  2,    0, 3);
-    HK("amp dec",   "s",   &p->amp_decay,     0.05,   4,    0, 3);
-    HK("release",   "s",   &p->amp_release,   0.02,   6,    0, 3);
+    HK("attack",   "s",   &p->amp_attack,    0.002,  2,    0, 3);
+    HK("decay",   "s",   &p->amp_decay,     0.05,   4,    0, 3);
     HK("sustain",   "%",   &p->amp_sustain,       0,  1,    0, 2);
+    HK("release",   "s",   &p->amp_release,   0.02,   6,    0, 3);
     HK("env filt",  "%",   &p->filter_env_depth, -1,  1,    0, 2);
     HK("lfo rate",  "Hz",  &p->lfo_rate,       0.1,  20,    0, 2);
     HK("vibrato",   "ct",  &p->vibrato,           0,100,    1, 1);

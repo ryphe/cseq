@@ -38,6 +38,8 @@
 SequencerState g_Seq;
 HWND g_hWnd = NULL;
 
+RECT g_masterVolBtnRect = { 0, 0, 0, 0 };
+
 volatile LONG g_shuttingDown = 0;
 volatile LONG g_haloActiveVoices = 0;
 

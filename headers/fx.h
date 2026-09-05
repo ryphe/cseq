@@ -7,7 +7,7 @@
 #include <math.h>
 
 #define FX_MAX_PARAMS 8
-#define FX_MAX_SLOTS  8
+#define FX_MAX_SLOTS  12
 
 #define DSP_PI_F      3.14159265358979323846f
 #define DSP_TWO_PI_F  6.28318530717958647692f
@@ -15,7 +15,7 @@
 enum { FX_PARAM_SLIDER, FX_PARAM_KNOB, FX_PARAM_TOGGLE, FX_PARAM_KNOB_LOG };
 enum { FX_TYPE_NONE = 0, FX_TYPE_TEST, FX_TYPE_BUFF, FX_TYPE_DELAY, FX_TYPE_REVERB,
        FX_TYPE_LOFI, FX_TYPE_PHASER, FX_TYPE_CHORUS, FX_TYPE_COMPRESSOR,
-       FX_TYPE_RESONATOR };
+       FX_TYPE_RESONATOR, FX_TYPE_TREMOLO, FX_TYPE_AUTOPAN, FX_TYPE_FLANGER };
 
 typedef struct { const char* name; int kind; float min, max, def; const char* fmt; } FxParamDef;
 typedef struct FxInstance FxInstance;
@@ -1027,6 +1027,247 @@ static void fx_resonator_process(FxInstance* fx, float* L, float* R) {
     *R = denormal_flush_f(inR * (1.0f - mix) + wetR * mix);
 }
 
+// --- Tremolo (with Tape Detune / Warble) --------------------------------------
+#define FX_TREMOLO_BUF_SIZE 4096
+#define FX_TREMOLO_BUF_MASK (FX_TREMOLO_BUF_SIZE - 1)
+
+typedef struct {
+    float sr;
+    float lfoPhase;
+    float bufL[FX_TREMOLO_BUF_SIZE];
+    float bufR[FX_TREMOLO_BUF_SIZE];
+    int   writePos;
+} FxTremoloState;
+
+static void fx_tremolo_init(FxInstance* fx, int sr) {
+    FxTremoloState* s = (FxTremoloState*)calloc(1, sizeof(FxTremoloState));
+    if (s) s->sr = (float)sr;
+    fx->state = s;
+}
+
+static void fx_tremolo_free(FxInstance* fx) {
+    free(fx->state);
+    fx->state = NULL;
+}
+
+static inline float fx_tremolo_read_hermite(const float* buf, float rPos) {
+    while (rPos < 0.0f) rPos += (float)FX_TREMOLO_BUF_SIZE;
+    int i1 = (int)rPos;
+    float fr = rPos - (float)i1;
+    int i0 = (i1 - 1) & FX_TREMOLO_BUF_MASK;
+    int i2 = (i1 + 1) & FX_TREMOLO_BUF_MASK;
+    int i3 = (i1 + 2) & FX_TREMOLO_BUF_MASK;
+    i1 &= FX_TREMOLO_BUF_MASK;
+    return fx_hermite(buf[i0], buf[i1], buf[i2], buf[i3], fr);
+}
+
+static void fx_tremolo_process(FxInstance* fx, float* L, float* R) {
+    FxTremoloState* s = (FxTremoloState*)fx->state;
+    if (!s || s->sr <= 0.0f) return;
+
+    float rate    = fx->params[0];
+    float depth   = fx->params[1] * 0.01f;
+    float warble  = fx->params[2] * 0.01f;
+    float spread  = fx->params[3];
+    float mix     = fx->params[4] * 0.01f;
+
+    if (rate < 0.05f)   rate = 0.05f;
+    if (rate > 20.0f)   rate = 20.0f;
+    if (depth < 0.0f)   depth = 0.0f;
+    if (depth > 1.0f)   depth = 1.0f;
+    if (warble < 0.0f)  warble = 0.0f;
+    if (warble > 1.0f)  warble = 1.0f;
+    if (spread < 0.0f)  spread = 0.0f;
+    if (spread > 180.0f) spread = 180.0f;
+    if (mix < 0.0f)     mix = 0.0f;
+    if (mix > 1.0f)     mix = 1.0f;
+
+    const float inL = *L, inR = *R;
+
+    // Advance master LFO
+    s->lfoPhase += rate / s->sr;
+    if (s->lfoPhase >= 1.0f) s->lfoPhase -= 1.0f;
+    s->lfoPhase = denormal_flush_f(s->lfoPhase);
+
+    // Channel phase offsets
+    float phL = s->lfoPhase;
+    float phR = s->lfoPhase + (spread / 360.0f);
+    if (phR >= 1.0f) phR -= 1.0f;
+
+    float modL = sinf(DSP_TWO_PI_F * phL);
+    float modR = sinf(DSP_TWO_PI_F * phR);
+
+    // Write input into circular buffer for Doppler pitch modulation
+    s->bufL[s->writePos] = inL;
+    s->bufR[s->writePos] = inR;
+
+    float srcL = inL;
+    float srcR = inR;
+
+    // Detune / Warble: Modulate delay time to produce Doppler pitch vibrato
+    if (warble > 0.001f) {
+        const float msToSamples = s->sr * 0.001f;
+        const float baseDelayMs = 3.5f;
+        const float warbleExcursionMs = 2.5f * warble;
+
+        float dlyL = (baseDelayMs + warbleExcursionMs * modL) * msToSamples;
+        float dlyR = (baseDelayMs + warbleExcursionMs * modR) * msToSamples;
+
+        srcL = fx_tremolo_read_hermite(s->bufL, (float)s->writePos - dlyL);
+        srcR = fx_tremolo_read_hermite(s->bufR, (float)s->writePos - dlyR);
+    }
+    s->writePos = (s->writePos + 1) & FX_TREMOLO_BUF_MASK;
+
+    // Optical/tube bias amplitude modulation law
+    float amL = 1.0f - depth * 0.5f * (1.0f + modL);
+    float amR = 1.0f - depth * 0.5f * (1.0f + modR);
+
+    float wetL = srcL * amL;
+    float wetR = srcR * amR;
+
+    *L = denormal_flush_f(inL * (1.0f - mix) + wetL * mix);
+    *R = denormal_flush_f(inR * (1.0f - mix) + wetR * mix);
+}
+
+// --- Autopan -----------------------------------------------------------------
+typedef struct {
+    float sr;
+    float lfoPhase;
+} FxAutopanState;
+
+static void fx_autopan_init(FxInstance* fx, int sr) {
+    FxAutopanState* s = (FxAutopanState*)calloc(1, sizeof(FxAutopanState));
+    if (s) s->sr = (float)sr;
+    fx->state = s;
+}
+
+static void fx_autopan_free(FxInstance* fx) {
+    free(fx->state);
+    fx->state = NULL;
+}
+
+static void fx_autopan_process(FxInstance* fx, float* L, float* R) {
+    FxAutopanState* s = (FxAutopanState*)fx->state;
+    if (!s || s->sr <= 0.0f) return;
+
+    float rate  = fx->params[0];
+    float depth = fx->params[1] * 0.01f;
+
+    if (rate < 0.05f) rate = 0.05f;
+    if (rate > 20.0f) rate = 20.0f;
+    if (depth < 0.0f) depth = 0.0f;
+    if (depth > 1.0f) depth = 1.0f;
+
+    s->lfoPhase += rate / s->sr;
+    if (s->lfoPhase >= 1.0f) s->lfoPhase -= 1.0f;
+    s->lfoPhase = denormal_flush_f(s->lfoPhase);
+
+    // Bipolar pan offset in [-1.0, 1.0]
+    float pan = depth * sinf(DSP_TWO_PI_F * s->lfoPhase);
+
+    // Constant-power (-3 dB) equal-power sine/cosine panning law
+    // At center (pan = 0), gainL = gainR = 1.0 (0 dB, perfectly transparent).
+    // Total acoustic energy (gainL^2 + gainR^2) remains constant across the sweep.
+    float theta = (pan + 1.0f) * (0.25f * DSP_PI_F);
+    const float kSqrt2 = 1.41421356f;
+    float gainL = cosf(theta) * kSqrt2;
+    float gainR = sinf(theta) * kSqrt2;
+
+    *L = denormal_flush_f(*L * gainL);
+    *R = denormal_flush_f(*R * gainR);
+}
+
+// --- Flanger (Stereo Through-Zero Capable Jet Resonator) ----------------------
+#define FX_FLANGER_BUF_SIZE 4096
+#define FX_FLANGER_BUF_MASK (FX_FLANGER_BUF_SIZE - 1)
+
+typedef struct {
+    float sr;
+    float bufL[FX_FLANGER_BUF_SIZE];
+    float bufR[FX_FLANGER_BUF_SIZE];
+    int   writePos;
+    float lfoPhase;
+    float fbL, fbR;
+} FxFlangerState;
+
+static void fx_flanger_init(FxInstance* fx, int sr) {
+    FxFlangerState* s = (FxFlangerState*)calloc(1, sizeof(FxFlangerState));
+    if (s) s->sr = (float)sr;
+    fx->state = s;
+}
+
+static void fx_flanger_free(FxInstance* fx) {
+    free(fx->state);
+    fx->state = NULL;
+}
+
+static inline float fx_flanger_read_hermite(const float* buf, float rPos) {
+    while (rPos < 0.0f) rPos += (float)FX_FLANGER_BUF_SIZE;
+    int i1 = (int)rPos;
+    float fr = rPos - (float)i1;
+    int i0 = (i1 - 1) & FX_FLANGER_BUF_MASK;
+    int i2 = (i1 + 1) & FX_FLANGER_BUF_MASK;
+    int i3 = (i1 + 2) & FX_FLANGER_BUF_MASK;
+    i1 &= FX_FLANGER_BUF_MASK;
+    return fx_hermite(buf[i0], buf[i1], buf[i2], buf[i3], fr);
+}
+
+static void fx_flanger_process(FxInstance* fx, float* L, float* R) {
+    FxFlangerState* s = (FxFlangerState*)fx->state;
+    if (!s || s->sr <= 0.0f) return;
+
+    float rate     = fx->params[0];
+    float depthMs  = fx->params[1];
+    float manualMs = fx->params[2];
+    float fbk      = fx->params[3] * 0.01f;
+    float mix      = fx->params[4] * 0.01f;
+
+    if (rate < 0.05f)     rate = 0.05f;
+    if (rate > 5.0f)      rate = 5.0f;
+    if (depthMs < 0.0f)   depthMs = 0.0f;
+    if (depthMs > 5.0f)   depthMs = 5.0f;
+    if (manualMs < 0.2f)  manualMs = 0.2f;
+    if (manualMs > 10.0f) manualMs = 10.0f;
+    if (fbk < -0.95f)     fbk = -0.95f;
+    if (fbk >  0.95f)     fbk =  0.95f;
+    if (mix < 0.0f)       mix = 0.0f;
+    if (mix > 1.0f)       mix = 1.0f;
+
+    const float inL = *L, inR = *R;
+    const float msToSamples = s->sr * 0.001f;
+
+    s->lfoPhase += rate / s->sr;
+    if (s->lfoPhase >= 1.0f) s->lfoPhase -= 1.0f;
+    s->lfoPhase = denormal_flush_f(s->lfoPhase);
+
+    // Unipolar quadrature LFO (Left and Right modulated 90 deg apart)
+    float lfoL = 0.5f * (1.0f + sinf(DSP_TWO_PI_F * s->lfoPhase));
+    float lfoR = 0.5f * (1.0f + sinf(DSP_TWO_PI_F * (s->lfoPhase + 0.25f)));
+
+    float dlyL = (manualMs + depthMs * lfoL) * msToSamples;
+    float dlyR = (manualMs + depthMs * lfoR) * msToSamples;
+
+    if (dlyL < 4.0f) dlyL = 4.0f;
+    if (dlyR < 4.0f) dlyR = 4.0f;
+    if (dlyL > (float)(FX_FLANGER_BUF_SIZE - 4)) dlyL = (float)(FX_FLANGER_BUF_SIZE - 4);
+    if (dlyR > (float)(FX_FLANGER_BUF_SIZE - 4)) dlyR = (float)(FX_FLANGER_BUF_SIZE - 4);
+
+    // Inject input + soft-clipped feedback into buffer
+    s->bufL[s->writePos] = denormal_flush_f(inL + fx_softclip(s->fbL * fbk));
+    s->bufR[s->writePos] = denormal_flush_f(inR + fx_softclip(s->fbR * fbk));
+
+    // High-resolution Hermite read (prevents high-frequency comb notch damping)
+    float wetL = fx_flanger_read_hermite(s->bufL, (float)s->writePos - dlyL);
+    float wetR = fx_flanger_read_hermite(s->bufR, (float)s->writePos - dlyR);
+
+    s->fbL = wetL;
+    s->fbR = wetR;
+    s->writePos = (s->writePos + 1) & FX_FLANGER_BUF_MASK;
+
+    // Linear mix: 50% gives 100% cancellation depth at comb notch frequencies
+    *L = denormal_flush_f(inL * (1.0f - mix) + wetL * mix);
+    *R = denormal_flush_f(inR * (1.0f - mix) + wetR * mix);
+}
  
 static const FxParamDef kFxTestParams[] = {
     { "Gain", FX_PARAM_SLIDER, 0.0f, 2.0f, 1.0f, "%.2fx" },
@@ -1095,16 +1336,40 @@ static const FxParamDef kFxResonatorParams[] = {
     { "Mix",  FX_PARAM_KNOB,   0.0f,  100.0f, 50.0f, "%.0f%%" },
 };
 
+static const FxParamDef kFxTremoloParams[] = {
+    { "Rate",   FX_PARAM_KNOB, 0.1f,   15.0f,   4.0f,   "%.2f Hz" },
+    { "Depth",  FX_PARAM_KNOB, 0.0f,  100.0f,  75.0f,   "%.0f%%" },
+    { "Warble", FX_PARAM_KNOB, 0.0f,  100.0f,  15.0f,   "%.0f%%" },
+    { "Spread", FX_PARAM_KNOB, 0.0f,  180.0f,   0.0f,   "%.0f deg" },
+    { "Mix",    FX_PARAM_KNOB, 0.0f,  100.0f, 100.0f,   "%.0f%%" },
+};
+
+static const FxParamDef kFxAutopanParams[] = {
+    { "Rate",  FX_PARAM_KNOB, 0.05f,  20.0f,   1.5f,    "%.2f Hz" },
+    { "Depth", FX_PARAM_KNOB, 0.0f,  100.0f, 100.0f,    "%.0f%%" },
+};
+
+static const FxParamDef kFxFlangerParams[] = {
+    { "Rate",     FX_PARAM_KNOB,   0.05f,   5.0f,   0.30f, "%.2f Hz" },
+    { "Depth",    FX_PARAM_KNOB,   0.0f,    5.0f,   2.00f, "%.2f ms" },
+    { "Manual",   FX_PARAM_KNOB,   0.2f,   10.0f,   1.50f, "%.2f ms" },
+    { "Feedback", FX_PARAM_KNOB, -95.0f,   95.0f,  65.0f,  "%.0f%%"  },
+    { "Mix",      FX_PARAM_KNOB,   0.0f,  100.0f,  50.0f,  "%.0f%%"  },
+};
+
 static const FxDescriptor kFxDescriptors[] = {
-    { FX_TYPE_TEST,   "Gain",   1, kFxTestParams,   fx_test_init,   fx_test_free,   fx_test_process   },
-    { FX_TYPE_BUFF,   "Buff",   4, kFxBuffParams,   fx_buff_init,   fx_buff_free,   fx_buff_process   },
-    { FX_TYPE_DELAY,  "Delay",  6, kFxDelayParams,  fx_delay_init,  fx_delay_free,  fx_delay_process  },
-    { FX_TYPE_REVERB, "Reverb", 6, kFxReverbParams, fx_reverb_init, fx_reverb_free, fx_reverb_process },
-    { FX_TYPE_LOFI,   "Lofi",   3, kFxLofiParams,   fx_lofi_init,   fx_lofi_free,   fx_lofi_process   },
-    { FX_TYPE_PHASER,      "Phaser",      6, kFxPhaserParams,      fx_phaser_init,      fx_phaser_free,      fx_phaser_process      },
-    { FX_TYPE_CHORUS,      "Chorus",      5, kFxChorusParams,      fx_chorus_init,      fx_chorus_free,      fx_chorus_process      },
-    { FX_TYPE_COMPRESSOR,  "Compressor",  6, kFxCompressorParams,  fx_compressor_init,  fx_compressor_free,  fx_compressor_process  },
-    { FX_TYPE_RESONATOR, "Resonator", 3, kFxResonatorParams, fx_resonator_init, fx_resonator_free, fx_resonator_process },
+    { FX_TYPE_TEST,       "Gain",       1, kFxTestParams,       fx_test_init,       fx_test_free,       fx_test_process       },
+    { FX_TYPE_BUFF,       "Buff",       4, kFxBuffParams,       fx_buff_init,       fx_buff_free,       fx_buff_process       },
+    { FX_TYPE_DELAY,      "Delay",      6, kFxDelayParams,      fx_delay_init,      fx_delay_free,      fx_delay_process      },
+    { FX_TYPE_REVERB,     "Reverb",     6, kFxReverbParams,     fx_reverb_init,     fx_reverb_free,     fx_reverb_process     },
+    { FX_TYPE_LOFI,       "Lofi",       3, kFxLofiParams,       fx_lofi_init,       fx_lofi_free,       fx_lofi_process       },
+    { FX_TYPE_PHASER,     "Phaser",     6, kFxPhaserParams,     fx_phaser_init,     fx_phaser_free,     fx_phaser_process     },
+    { FX_TYPE_CHORUS,     "Chorus",     5, kFxChorusParams,     fx_chorus_init,     fx_chorus_free,     fx_chorus_process     },
+    { FX_TYPE_COMPRESSOR, "Compressor", 6, kFxCompressorParams, fx_compressor_init, fx_compressor_free, fx_compressor_process },
+    { FX_TYPE_RESONATOR,  "Resonator",  3, kFxResonatorParams,  fx_resonator_init,  fx_resonator_free,  fx_resonator_process  },
+    { FX_TYPE_TREMOLO,    "Tremolo",    5, kFxTremoloParams,    fx_tremolo_init,    fx_tremolo_free,    fx_tremolo_process    },
+    { FX_TYPE_AUTOPAN,    "Autopan",    2, kFxAutopanParams,    fx_autopan_init,    fx_autopan_free,    fx_autopan_process    },
+    { FX_TYPE_FLANGER,    "Flanger",    5, kFxFlangerParams,    fx_flanger_init,    fx_flanger_free,    fx_flanger_process    },
 };
 
 #define FX_DESCRIPTOR_COUNT ((int)(sizeof(kFxDescriptors) / sizeof(kFxDescriptors[0])))

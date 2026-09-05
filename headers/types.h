@@ -1,5 +1,8 @@
 #pragma once
 #include "config.h"
+
+#define MIDI_KB_MAX 8   // polyphonic note-audition voice cap (mouse + QWERTY)
+
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -228,6 +231,16 @@ typedef struct {
     int       dragStartX, dragStartY;
     float     dragStartBeatOffset, dragLeadBeatOrig;
     int       dragLeadMidiOrig, auditionNote;
+    // Polyphonic note audition (mouse strip + QWERTY keys): the engine
+    // streams grains across every held note. auditionNote above stays the
+    // most-recently-pressed pitch for paint highlighting.
+    int       kbHeldNotes[MIDI_KB_MAX];
+    int       kbHeldVKs[MIDI_KB_MAX]; // physical key per held pitch (key-up match)
+    int       kbHeldCount;
+    int       mouseNote;             // pitch held by the mouse strip, -1 none
+    int       auditionNotes[MIDI_KB_MAX];
+    int       auditionNoteCount;
+    int       auditionSpawnIdx;      // round-robin index into auditionNotes
     bool      isMarqueeSelecting;
     int       marqueeStartX, marqueeStartY, marqueeCurX, marqueeCurY;
 } GranularEngine;
@@ -268,6 +281,7 @@ typedef struct {
 typedef struct {
     Clip* clips;
     GranClipSnapshot* clipGran;
+    struct FxTrackSnapshot* trackFx;
     int               clipCount;
 } UndoSnapshot;
 
@@ -724,6 +738,19 @@ typedef struct {
     double auditionPlayheadBeat;
     int   octaveShift;           
 
+    // Polyphonic keyboard audition: up to 8 simultaneously held keys (QWERTY
+    // mapping). auditionNotes/auditionNoteCount is the effective held set
+    // (mouse + keyboard union) consumed by the audio thread; auditionNote /
+    // auditionHeld above stay as the "last pressed" note for paint
+    // highlighting.
+    int   auditionNotes[MIDI_KB_MAX];
+    int   auditionNoteCount;
+    int   kbHeldNotes[MIDI_KB_MAX];  // keyboard-held pitches (resolved at press time)
+    int   kbHeldVKs[MIDI_KB_MAX];    // physical key per held pitch, so key-up
+                                     // matches even if the octave changed mid-hold
+    int   kbHeldCount;
+    int   mousePitch;                // pitch held by the mouse key strip, -1 none           
+
      
     bool  isMarqueeSelecting;
     int   marqueeStartX, marqueeStartY, marqueeCurX, marqueeCurY;
@@ -755,4 +782,158 @@ extern CRITICAL_SECTION g_midiLock;
 
 static inline bool midi_editor_is_open(void) {
     return (g_midiHwnd != NULL && IsWindow(g_midiHwnd));
+}
+
+// --- Shared polyphonic audition set (MIDI/Quadrum/Halo piano rolls) --------
+// The audio thread consumes g_midiEdit.auditionNotes[] (the union of the
+// mouse-held pitch and all keyboard-held pitches, up to MIDI_KB_MAX). Every
+// helper below must run under midi_lock.
+
+static inline void midi_audition_rebuild_poly(void) {
+    g_midiEdit.auditionNoteCount = 0;
+    if (g_midiEdit.mousePitch >= 0)
+        g_midiEdit.auditionNotes[g_midiEdit.auditionNoteCount++] = g_midiEdit.mousePitch;
+    for (int i = 0; i < g_midiEdit.kbHeldCount && g_midiEdit.auditionNoteCount < MIDI_KB_MAX; ++i) {
+        int p = g_midiEdit.kbHeldNotes[i];
+        bool dup = false;
+        for (int j = 0; j < g_midiEdit.auditionNoteCount; ++j) {
+            if (g_midiEdit.auditionNotes[j] == p) { dup = true; break; }
+        }
+        if (!dup) g_midiEdit.auditionNotes[g_midiEdit.auditionNoteCount++] = p;
+    }
+    g_midiEdit.auditionHeld = (g_midiEdit.auditionNoteCount > 0);
+    g_midiEdit.auditionNote = g_midiEdit.auditionHeld
+        ? g_midiEdit.auditionNotes[g_midiEdit.auditionNoteCount - 1]
+        : 0;
+}
+
+// Keyboard entries are keyed by the physical key (VK), not the pitch: the
+// pitch is resolved at press time, so an octave change while a key is held
+// must not break the key-up match (a pitch-matched remove would strand the
+// held note until some later key-up re-resolved to it).
+static inline void midi_audition_kb_add(int vk, int pitch) {
+    for (int i = 0; i < g_midiEdit.kbHeldCount; ++i) {
+        if (g_midiEdit.kbHeldVKs[i] == vk) return;   // key already held
+    }
+    if (g_midiEdit.kbHeldCount >= MIDI_KB_MAX) {
+        memmove(&g_midiEdit.kbHeldNotes[0], &g_midiEdit.kbHeldNotes[1],
+                sizeof(int) * (MIDI_KB_MAX - 1));
+        memmove(&g_midiEdit.kbHeldVKs[0], &g_midiEdit.kbHeldVKs[1],
+                sizeof(int) * (MIDI_KB_MAX - 1));
+        g_midiEdit.kbHeldCount = MIDI_KB_MAX - 1;
+    }
+    g_midiEdit.kbHeldVKs[g_midiEdit.kbHeldCount] = vk;
+    g_midiEdit.kbHeldNotes[g_midiEdit.kbHeldCount++] = pitch;
+    midi_audition_rebuild_poly();
+}
+
+static inline void midi_audition_kb_remove(int vk) {
+    for (int i = 0; i < g_midiEdit.kbHeldCount; ++i) {
+        if (g_midiEdit.kbHeldVKs[i] == vk) {
+            for (int j = i; j < g_midiEdit.kbHeldCount - 1; ++j) {
+                g_midiEdit.kbHeldNotes[j] = g_midiEdit.kbHeldNotes[j + 1];
+                g_midiEdit.kbHeldVKs[j]   = g_midiEdit.kbHeldVKs[j + 1];
+            }
+            g_midiEdit.kbHeldCount--;
+            break;
+        }
+    }
+    midi_audition_rebuild_poly();
+}
+
+static inline void midi_audition_set_mouse(int pitch) {
+    g_midiEdit.mousePitch = (pitch < 0) ? -1 : pitch;
+    midi_audition_rebuild_poly();
+}
+
+static inline void midi_audition_clear_poly(void) {
+    g_midiEdit.kbHeldCount = 0;
+    g_midiEdit.mousePitch = -1;
+    midi_audition_rebuild_poly();
+}
+
+// --- Granular engine audition set (mirror of the above for the engine) -----
+// Same union model; must run under seq_lock.
+static inline void gran_audition_rebuild(GranularEngine* e) {
+    if (!e) return;
+    e->auditionNoteCount = 0;
+    if (e->mouseNote >= 0)
+        e->auditionNotes[e->auditionNoteCount++] = e->mouseNote;
+    for (int i = 0; i < e->kbHeldCount && e->auditionNoteCount < MIDI_KB_MAX; ++i) {
+        int p = e->kbHeldNotes[i];
+        bool dup = false;
+        for (int j = 0; j < e->auditionNoteCount; ++j) {
+            if (e->auditionNotes[j] == p) { dup = true; break; }
+        }
+        if (!dup) e->auditionNotes[e->auditionNoteCount++] = p;
+    }
+    e->auditionNote = (e->auditionNoteCount > 0)
+        ? e->auditionNotes[e->auditionNoteCount - 1] : 0;
+    if (e->auditionSpawnIdx >= e->auditionNoteCount) e->auditionSpawnIdx = 0;
+}
+
+// Same VK-keyed model as the MIDI roll above: entries are matched by the
+// physical key so an octave change mid-hold can't strand a held note.
+static inline void gran_audition_kb_add(GranularEngine* e, int vk, int pitch) {
+    if (!e) return;
+    for (int i = 0; i < e->kbHeldCount; ++i) {
+        if (e->kbHeldVKs[i] == vk) return;
+    }
+    if (e->kbHeldCount >= MIDI_KB_MAX) {
+        memmove(&e->kbHeldNotes[0], &e->kbHeldNotes[1], sizeof(int) * (MIDI_KB_MAX - 1));
+        memmove(&e->kbHeldVKs[0], &e->kbHeldVKs[1], sizeof(int) * (MIDI_KB_MAX - 1));
+        e->kbHeldCount = MIDI_KB_MAX - 1;
+    }
+    e->kbHeldVKs[e->kbHeldCount] = vk;
+    e->kbHeldNotes[e->kbHeldCount++] = pitch;
+    gran_audition_rebuild(e);
+}
+
+static inline void gran_audition_kb_remove(GranularEngine* e, int vk) {
+    if (!e) return;
+    for (int i = 0; i < e->kbHeldCount; ++i) {
+        if (e->kbHeldVKs[i] == vk) {
+            for (int j = i; j < e->kbHeldCount - 1; ++j) {
+                e->kbHeldNotes[j] = e->kbHeldNotes[j + 1];
+                e->kbHeldVKs[j]   = e->kbHeldVKs[j + 1];
+            }
+            e->kbHeldCount--;
+            break;
+        }
+    }
+    gran_audition_rebuild(e);
+}
+
+static inline void gran_audition_set_mouse(GranularEngine* e, int pitch) {
+    if (!e) return;
+    e->mouseNote = (pitch < 0) ? -1 : pitch;
+    gran_audition_rebuild(e);
+}
+
+static inline void gran_audition_clear(GranularEngine* e) {
+    if (!e) return;
+    e->kbHeldCount = 0;
+    e->mouseNote = -1;
+    gran_audition_rebuild(e);
+}
+
+// QWERTY piano-roll keyboard mapping: white keys A S D F G H J K L, black
+// keys W E T Y U O P (C C# D D# E F F# G G# A A# B C C# D D#). Returns the
+// semitone offset (0-15) for the pressed key, or -1 when unmapped. Layout
+// aware via MapVirtualKey so AZERTY keyboards play the note printed on the
+// key. Callers gate on their own Ctrl/Shift/Alt checks.
+static inline int pr_key_to_semitone(int vkCode) {
+    int ch = (int)(MapVirtualKeyA((UINT)vkCode, MAPVK_VK_TO_CHAR) & 0xFF);
+    if (ch >= 'A' && ch <= 'Z') ch += 'a' - 'A';
+    switch (ch) {
+        case 'a': return 0;  case 'w': return 1;
+        case 's': return 2;  case 'e': return 3;
+        case 'd': return 4;  case 'f': return 5;
+        case 't': return 6;  case 'g': return 7;
+        case 'y': return 8;  case 'h': return 9;
+        case 'u': return 10; case 'j': return 11;
+        case 'k': return 12; case 'o': return 13;
+        case 'l': return 14; case 'p': return 15;
+        default:  return -1;
+    }
 }

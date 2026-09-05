@@ -208,14 +208,6 @@ static inline void stereo_limiter_process(StereoLimiter *L, float *inL, float *i
 }
 
  
-static inline float midi_velocity_gain(float vNorm) {
-    if (vNorm <= 0.0f) return 0.0f;
-    if (vNorm > 1.0f) vNorm = 1.0f;
-     
-    return expf((vNorm - 1.0f) * 1.5f * 2.302585093f);
-}
-
- 
 static inline float midi_adsr_level_at(double posInNote, double noteFrames,
                                        float atkFrames, float decFrames, float sustain) {
     (void)noteFrames;
@@ -477,8 +469,12 @@ static inline void midi_editor_process_preview(float* L, float* R, ma_uint32 fra
         // per-sample DSP loop so rapid UI mouse moves can't stall the audio
         // thread (priority inversion / underruns). c stays valid because the
         // caller holds seq_lock across this chunk.
-        const int    audNote   = g_midiEdit.auditionNote;
-        const bool   audHeld   = g_midiEdit.auditionHeld;
+        int    heldKeys[8];
+        int    heldKeyCount = 0;
+        for (int i = 0; i < 8 && i < g_midiEdit.auditionNoteCount; ++i) {
+            heldKeys[i] = g_midiEdit.auditionNotes[i];
+            heldKeyCount = i + 1;
+        }
         const bool   playLoop  = g_midiEdit.isAuditionPlaying && c->lengthBeats > 0.01f;
         const int    clipIdx   = g_midiEdit.clipIdx;
         const double invFpbP   = 1.0 / (double)(fpb > 0.0 ? fpb : 1.0);
@@ -497,7 +493,7 @@ static inline void midi_editor_process_preview(float* L, float* R, ma_uint32 fra
         for (ma_uint32 f = 0; f < frameCount; ++f) {
             float sumL = 0.0f, sumR = 0.0f;
             synth_editor_process_preview(c, clipIdx, &sumL, &sumR,
-                                         audNote, audHeld, localBeat, playLoop, fpb);
+                                         heldKeys, heldKeyCount, localBeat, playLoop, fpb);
             L[f] += sumL * panL;
             R[f] += sumR * panR;
             if (playLoop) {
@@ -516,8 +512,13 @@ static inline void midi_editor_process_preview(float* L, float* R, ma_uint32 fra
     }
 
     const bool playLoop = g_midiEdit.isAuditionPlaying && c->lengthBeats > 0.01f;
-    const int  audNote  = g_midiEdit.auditionNote;
-    const bool audHeld  = g_midiEdit.auditionHeld;
+    int  heldKeys[8];
+    int  heldKeyCount = 0;
+    for (int i = 0; i < 8 && i < g_midiEdit.auditionNoteCount; ++i) {
+        heldKeys[i] = g_midiEdit.auditionNotes[i];
+        heldKeyCount = i + 1;
+    }
+    const bool audHeld  = (heldKeyCount > 0);
     if (!playLoop && !audHeld) { midi_unlock(); return; }
     const double invFpb = 1.0 / (double)fpb;
     const float  swing  = g_Seq.swing;   // read under seq_lock (caller holds it)
@@ -531,14 +532,9 @@ static inline void midi_editor_process_preview(float* L, float* R, ma_uint32 fra
     }
     // SoundFont: when no sample is attached, audition the pre-rendered note
     // bank through the SAME voice engine as samples, so per-note ADSR and the
-    // track pan apply uniformly. The single-note audition reads the clicked
-    // key; the [PLAY] loop resolves each note's own pre-rendered sample below.
+    // track pan apply uniformly. Each held key resolves its own pre-rendered
+    // sample; the [PLAY] loop resolves each note's sample below.
     const bool useSfont = sfont_is_ready();
-    bool sfontAud = false;
-    if (!s && useSfont && audNote > 0) {
-        s = sfont_get_sample(audNote);
-        if (s) sfontAud = true;
-    }
 
     // Preview must honor the clip's ADSR knobs, not fixed micro-fades, so
     // what you hear while editing matches timeline playback. Envelope needs
@@ -562,62 +558,111 @@ static inline void midi_editor_process_preview(float* L, float* R, ma_uint32 fra
     float prevPanR = (prevPan >= 0.0f) ? 1.0f : (1.0f + prevPan);
 
      
-    static double s_audPos = 0.0;
-    static int    s_lastNote = 0;
-    static float  s_audRamp = 0.0f;
-    const float   kRampStep = 1.0f / 128.0f;
+    // Polyphonic keyboard audition: 8 slots, one per simultaneously held key.
+    // Slots follow the clip's ADSR knobs exactly like the PLAY-loop voices
+    // (midi_adsr_gain: A->D->S during the hold, release tail over the Release
+    // knob's time once the key leaves the set), so audition and playback share
+    // the same envelope. Every slot keeps its own read position and per-note
+    // sample resolution.
+    typedef struct {
+        int    key;
+        double pos;       // sample read position
+        double envFrame;  // frames since note-on (advances through the tail)
+        double envLen;    // envelope "note length": huge while held, frozen at release
+        const AudioSample* sample;
+        bool   sfont;     // pre-rendered SoundFont note (rate 1.0) vs clip sample
+    } AudSlot;
+    static AudSlot s_aud[8] = { {0} };
+    const double kHeldLen = 1.0e12;
 
     for (ma_uint32 f = 0; f < frameCount; ++f) {
         float sumL = 0.0f, sumR = 0.0f;
 
-         
-        if (audNote > 0) {
-            if (audNote != s_lastNote) {
-                s_lastNote = audNote;
-                s_audRamp = 0.0f;
+        // Begin the release tail for slots whose key is no longer held; the
+        // gain derives from the ADSR Release knob, so no extra fade code.
+        for (int sl = 0; sl < 8; ++sl) {
+            if (s_aud[sl].key <= 0) continue;
+            bool still = false;
+            for (int h = 0; h < heldKeyCount; ++h) {
+                if (heldKeys[h] == s_aud[sl].key) { still = true; break; }
             }
-            if (s_audRamp < 1.0f) {
-                s_audRamp += kRampStep;
-                if (s_audRamp > 1.0f) s_audRamp = 1.0f;
+            if (!still) s_aud[sl].envLen = s_aud[sl].envFrame;
+        }
+        // Allocate slots for freshly-held keys, resolving each note's sample.
+        for (int h = 0; h < heldKeyCount; ++h) {
+            int key = heldKeys[h];
+            if (key <= 0) continue;
+            bool has = false;
+            for (int sl = 0; sl < 8; ++sl) {
+                if (s_aud[sl].key == key) { has = true; break; }
             }
+            if (has) continue;
+            for (int sl = 0; sl < 8; ++sl) {
+                if (s_aud[sl].key > 0) continue;
+                const AudioSample* ks = s;         // clip's sample (shared)
+                bool ksFont = false;
+                if (!ks && useSfont) {
+                    ks = sfont_get_sample(key);
+                    ksFont = (ks != NULL);
+                }
+                if (ks) {
+                    s_aud[sl].key      = key;
+                    s_aud[sl].pos      = 0.0;
+                    s_aud[sl].envFrame = 0.0;
+                    s_aud[sl].envLen   = kHeldLen;
+                    s_aud[sl].sample   = ks;
+                    s_aud[sl].sfont    = ksFont;
+                }
+                break;
+            }
+        }
 
-
-            float pitch = (float)audNote;
+        // Render every active slot into the summed audition output.
+        for (int sl = 0; sl < 8; ++sl) {
+            if (s_aud[sl].key <= 0) continue;
+            AudSlot* au = &s_aud[sl];
+            // ADSR knob envelope (identical shape to the PLAY-loop voices).
+            float env = midi_adsr_gain(au->envFrame, au->envLen,
+                                       atkFrames, decFrames, sustain, relFrames);
+            au->envFrame += 1.0;
+            if (env <= 0.0f) {
+                // A sustain-0 note can stay at 0 while held; only retire the
+                // slot once its release tail has fully died.
+                bool still = false;
+                for (int h = 0; h < heldKeyCount; ++h) {
+                    if (heldKeys[h] == au->key) { still = true; break; }
+                }
+                if (!still) { au->key = 0; au->pos = 0.0; }
+                continue;
+            }
             // A pre-rendered SoundFont note is already at its exact pitch;
             // a regular sample file is pitched relative to MIDI 60.
-            double rate = sfontAud ? 1.0 : powf(2.0f, (pitch - 60.0f) / 12.0f);
+            double rate = au->sfont ? 1.0 : powf(2.0f, ((float)au->key - 60.0f) / 12.0f);
             if (rate < 0.01) rate = 0.01;
             if (rate > 16.0) rate = 16.0;
 
-            float sl, sr;
-            if (s) {
-                s_audPos += rate;
-                if (s_audPos >= (double)s->frameCount)
-                    s_audPos -= floor(s_audPos / (double)s->frameCount) * (double)s->frameCount;
+            const AudioSample* as = au->sample;
+            if (!as || !as->pFrames) continue;
+            au->pos += rate;
+            if (au->pos >= (double)as->frameCount)
+                au->pos -= floor(au->pos / (double)as->frameCount) * (double)as->frameCount;
 
-                ma_uint64 i0 = (ma_uint64)s_audPos;
-                ma_uint64 i1 = (i0 + 1 < s->frameCount) ? (i0 + 1) : i0;
-                float frac = (float)(s_audPos - (double)i0);
-                sl = s->pFrames[i0 * 2 + 0] + frac * (s->pFrames[i1 * 2 + 0] - s->pFrames[i0 * 2 + 0]);
-                sr = s->pFrames[i1 * 2 + 1] + frac * (s->pFrames[i1 * 2 + 1] - s->pFrames[i0 * 2 + 1]);
+            ma_uint64 i0 = (ma_uint64)au->pos;
+            ma_uint64 i1 = (i0 + 1 < as->frameCount) ? (i0 + 1) : i0;
+            float frac = (float)(au->pos - (double)i0);
+            float slL = as->pFrames[i0 * 2 + 0] + frac * (as->pFrames[i1 * 2 + 0] - as->pFrames[i0 * 2 + 0]);
+            float slR = as->pFrames[i1 * 2 + 1] + frac * (as->pFrames[i1 * 2 + 1] - as->pFrames[i0 * 2 + 1]);
 
-                float edgeFade = 1.0f;
-                double framesLeft = (double)s->frameCount - s_audPos;
-                if (framesLeft < 64.0) edgeFade = (float)(framesLeft / 64.0);
-                if (edgeFade < 0.0f) edgeFade = 0.0f;
-                float gain = 0.55f * s_audRamp * edgeFade;
-                sumL += sl * gain * prevPanL;
-                sumR += sr * gain * prevPanR;
-            }
-            // No sample and no SoundFont loaded: stay silent rather than
-            // synthesize a tone, so a bare key press produces nothing.
-        } else {
-            s_audRamp = 0.0f;
-            s_lastNote = 0;
+            float edgeFade = 1.0f;
+            double framesLeft = (double)as->frameCount - au->pos;
+            if (framesLeft < 64.0) edgeFade = (float)(framesLeft / 64.0);
+            if (edgeFade < 0.0f) edgeFade = 0.0f;
+            float gain = 0.55f * env * edgeFade;
+            sumL += slL * gain * prevPanL;
+            sumR += slR * gain * prevPanR;
         }
 
-          
-        if (playLoop) {
+if (playLoop) {
             float beat = (float)g_midiEdit.auditionPlayheadBeat;
 
             // Voices still ringing: a note stays alive through its release
@@ -2032,7 +2077,7 @@ static inline void export_timeline_to_wav(const char* outputPath) {
     // Only clear the MIDI audition so the preview path isn't double-rendering
     // into the live callback during export.
     midi_lock();
-    g_midiEdit.auditionNote = 0;
+    midi_audition_clear_poly();
     g_midiEdit.isAuditionPlaying = false;
     g_midiEdit.auditionPlayheadBeat = 0.0;
     midi_unlock();

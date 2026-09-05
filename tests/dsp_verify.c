@@ -68,13 +68,13 @@ int main(void) {
                            fx_resonator_init, fx_resonator_free, fx_resonator_process };
         FxInstance fx; fx.desc = &d;
         for (int p = 0; p < FX_MAX_PARAMS; ++p) fx.params[p] = 0.0f;
-        fx.params[0] = 440.0f; fx.params[1] = 20.0f; fx.params[2] = 100.0f;
+        fx.params[0] = 69.0f; fx.params[1] = 20.0f; fx.params[2] = 100.0f; // Note 69 = A4 (440 Hz)
         fx_instance_init(&fx, (int)SR);
 
         // Sine at f0: SVF band gain is Q (=1/k); the 1/sqrt(Q) output scale
         // sets the net resonant peak to sqrt(Q) (~4.47 for Q=20), so a 0.1
         // sine rings at ~0.45 - audible above the mix without clipping.
-        fx.params[0] = 440.0f; fx.params[1] = 20.0f; fx.params[2] = 100.0f;
+        fx.params[0] = 69.0f; fx.params[1] = 20.0f; fx.params[2] = 100.0f;
         fx_instance_init(&fx, (int)SR);
         {
             // measure with 0.1 amp input
@@ -100,7 +100,7 @@ int main(void) {
         }
 
         // Sine far off resonance -> strongly attenuated (relative to on-res).
-        fx.params[0] = 440.0f; fx.params[1] = 20.0f; fx.params[2] = 100.0f;
+        fx.params[0] = 69.0f; fx.params[1] = 20.0f; fx.params[2] = 100.0f;
         fx_resonator_init(&fx, (int)SR);
         {
             float phase = 0.0f; float peakOff = 0.0f; int n = (int)SR / 2;
@@ -115,7 +115,7 @@ int main(void) {
         }
 
         // Stability at extreme settings: loud input, max Q, sweep — bounded.
-        fx.params[0] = 200.0f; fx.params[1] = 40.0f; fx.params[2] = 100.0f;
+        fx.params[0] = 60.0f; fx.params[1] = 35.0f; fx.params[2] = 100.0f;
         fx_resonator_init(&fx, (int)SR);
         {
             float worst = 0.0f;
@@ -290,22 +290,27 @@ int main(void) {
         }
         CHECK(worst > 0.1f && worst <= 1.05f, "Chorus impulse produces bounded wet signal");
 
-        // Equal-power mix: a 5 Hz tone has a 200 ms period, ~17x longer than
-        // the 12 ms delay, so dry and wet are nearly in phase and the 50%
-        // crossfade must sit near unity amplitude (no 100%-wet vibrato).
+        // Equal-power mix: use a mid-band tone. The wet path deliberately
+        // high-passes bass (BBD tone conditioning, ~90 Hz HPF) to keep low end
+        // un-phased, so a low test tone would be stripped from the wet signal
+        // and the crossfade could never be exercised. 1000 Hz sits in the wet
+        // passband and its 12 ms delay is ~12 full cycles, so dry and wet stay
+        // near in phase: the 50% crossfade must sit near unity amplitude
+        // (no 100%-wet vibrato).
         fx_chorus_init(&fx, (int)SR);
         {
+            const float toneF = 1000.0f;
             float phase2 = 0.0f; float pk = 0.0f; int n2 = (int)SR / 2;
             for (int i = 0; i < n2; ++i) {
-                phase2 += 5.0f / SR;
+                phase2 += toneF / SR;
                 if (phase2 >= 1.0f) phase2 -= 1.0f;
                 float L = 0.5f * sinf(6.2831853f * phase2), R = L;
                 fx.desc->process(&fx, &L, &R);
                 if (i >= n2 / 2 && fabsf(L) > pk) pk = fabsf(L);
             }
-            // 0.707*(dry+wet) with a slowly drifting ~12 ms phase offset:
-            // amplitude wobbles between ~0.25 and ~1.0; require substantial
-            // dry presence rather than the 0.1-ish pure-vibrato floor.
+            // 0.707*(dry+wet) with the LFO sweeping the ~12 ms phase offset:
+            // amplitude wobbles but must keep substantial dry presence rather
+            // than dropping to the pure-vibrato floor.
             CHECK(pk > 0.4f && pk < 1.1f, "Chorus 50% equal-power mix stays level (no 100%-wet vibrato)");
         }
 

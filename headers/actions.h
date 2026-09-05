@@ -652,7 +652,7 @@ static inline bool split_single_clip_internal(int clipIdx, float splitBeat, floa
     float secondPartLen = c->lengthBeats - firstPartLen;
 
          
-        if (c->isMidi) {
+    if (c->isMidi) {
             Clip n;
             memset(&n, 0, sizeof(Clip));
             n.nextClipInBar = 0xFFFF;
@@ -665,6 +665,20 @@ static inline bool split_single_clip_internal(int clipIdx, float splitBeat, floa
             n.volume = c->volume;
             n.playbackRate = 1.0f;
             n.isSelected = false;
+            n.isMuted = c->isMuted;
+
+            // Preserve synth module identity and voice patches (Quadrum & Halo)
+            n.clipKind      = c->clipKind;
+            n.adsrAttack    = c->adsrAttack;
+            n.adsrDecay     = c->adsrDecay;
+            n.adsrSustain   = c->adsrSustain;
+            n.adsrRelease   = c->adsrRelease;
+            n.synthAttack   = c->synthAttack;
+            n.synthDecay    = c->synthDecay;
+            n.synthSustain  = c->synthSustain;
+            n.synthRelease  = c->synthRelease;
+            memcpy(n.quadrumParams, c->quadrumParams, sizeof(n.quadrumParams));
+            n.haloPatch = c->haloPatch;
 
             MidiNote tempNotes[MIDI_MAX_NOTES];
             int tempCount = c->midiNoteCount;
@@ -693,7 +707,6 @@ static inline bool split_single_clip_internal(int clipIdx, float splitBeat, floa
                         n.midiNotes[n.midiNoteCount++] = newNt;
                     }
                 } else {
-                    
                     MidiNote leftNt = *nt;
                     leftNt.lengthBeats = firstPartLen - ntStart;
                     if (leftNt.lengthBeats > 0.01f && c->midiNoteCount < MIDI_MAX_NOTES) {
@@ -720,11 +733,12 @@ static inline bool split_single_clip_internal(int clipIdx, float splitBeat, floa
             g_ClipGran[newIdx].sampleIndex = n.sampleIndex;
             g_ClipGran[newIdx].volume = 0.85f;
             g_Seq.clipCount++;
+            
+            // correctly detects CLIP_KIND_QUADRUM and pre-renders transient voice buffers
             synth_state_init_clip(newIdx);
             g_timelineDirty = true;
             return true;
         }
-
          
         AudioSample *s = &g_Seq.samples[c->sampleIndex];
 
@@ -924,6 +938,155 @@ static inline void split_clip_at_mouse_or_playhead(void) {
     } else {
         split_clips_at_playhead();
     }
+}
+
+// --- Sample Clip Reversing (Single & Batch) -----------------------------------
+
+// Calculates the mirrored sample offset for a reversed clip.
+// Given original offset and clip length (converted to frames taking playbackRate into account),
+// mirrors the window around the buffer:
+// newOffset = originalSampleFrameCount - offsetFrames - clipFrameLength
+static inline ma_uint64 reverse_remap_clip_offset(const Clip* c, const AudioSample* s, float fpb) {
+    if (!c || !s || s->frameCount == 0) return 0;
+    if (c->sampleOffsetFrames >= s->frameCount) return 0;
+
+    double pRate = (c->playbackRate > 0.01f) ? (double)c->playbackRate : 1.0;
+    double spanFrames = (double)c->lengthBeats * (double)fpb * pRate;
+    if (spanFrames < 1.0) spanFrames = 1.0;
+
+    ma_uint64 avail = s->frameCount - c->sampleOffsetFrames;
+    if ((double)avail < spanFrames) {
+        spanFrames = (double)avail;
+    }
+
+    ma_uint64 clipFrameLength = (ma_uint64)(spanFrames + 0.5);
+    if (c->sampleOffsetFrames + clipFrameLength > s->frameCount) {
+        clipFrameLength = s->frameCount - c->sampleOffsetFrames;
+    }
+
+    if (s->frameCount >= c->sampleOffsetFrames + clipFrameLength) {
+        return s->frameCount - c->sampleOffsetFrames - clipFrameLength;
+    }
+    return 0;
+}
+
+// Creates or looks up a content-addressed reversed version of sample `srcIndex`.
+// Reverses the stereo PCM buffer, hashes it via sample_hash_pcm, checks g_Seq.samples
+// for dedup, and if new, stores into disk cache and generates LOD peak pyramid.
+// Returns the sample index in g_Seq.samples, or -1 on failure.
+static inline int get_or_create_reversed_sample(int srcIndex) {
+    if (srcIndex < 0 || srcIndex >= g_Seq.sampleCount) return -1;
+    const AudioSample* src = &g_Seq.samples[srcIndex];
+    if (!src->loaded || !src->pFrames || src->frameCount == 0) return -1;
+
+    ma_uint64 fc = src->frameCount;
+    size_t totalFloats = (size_t)fc * NUM_CHANNELS;
+    float* revPcm = (float*)malloc(totalFloats * sizeof(float));
+    if (!revPcm) return -1;
+
+    const float* srcPcm = src->pFrames;
+    for (ma_uint64 i = 0; i < fc; ++i) {
+        ma_uint64 revI = fc - 1 - i;
+        revPcm[i * NUM_CHANNELS + 0] = srcPcm[revI * NUM_CHANNELS + 0];
+        revPcm[i * NUM_CHANNELS + 1] = srcPcm[revI * NUM_CHANNELS + 1];
+    }
+
+    uint64_t hash = sample_hash_pcm(revPcm, totalFloats * sizeof(float));
+
+    // Dedup: check if an identical sample is already in g_Seq.samples
+    // (e.g. reversing an already-reversed sample back to original, or duplicate reverse)
+    for (int i = 0; i < g_Seq.sampleCount; ++i) {
+        const AudioSample* ex = &g_Seq.samples[i];
+        if (ex->loaded && ex->frameCount == fc && ex->contentHash == hash) {
+            free(revPcm);
+            return i;
+        }
+    }
+
+    if (g_Seq.sampleCount >= MAX_SAMPLES) {
+        free(revPcm);
+        return -1;
+    }
+
+    int newIdx = g_Seq.sampleCount;
+    AudioSample* as = &g_Seq.samples[newIdx];
+    memset(as, 0, sizeof(AudioSample));
+
+    const char* suffix = " (reversed)";
+    size_t sfxLen = strlen(suffix);
+    size_t nameLen = strlen(src->name);
+    if (nameLen > sfxLen && strcmp(src->name + nameLen - sfxLen, suffix) == 0) {
+        size_t baseLen = nameLen - sfxLen;
+        if (baseLen >= sizeof(as->name)) baseLen = sizeof(as->name) - 1;
+        memcpy(as->name, src->name, baseLen);
+        as->name[baseLen] = '\0';
+    } else {
+        snprintf(as->name, sizeof(as->name), "%.*s (reversed)", (int)(sizeof(as->name) - 13), src->name);
+    }
+
+    size_t fileLen = strlen(src->filename);
+    if (fileLen > sfxLen && strcmp(src->filename + fileLen - sfxLen, suffix) == 0) {
+        size_t baseLen = fileLen - sfxLen;
+        if (baseLen >= sizeof(as->filename)) baseLen = sizeof(as->filename) - 1;
+        memcpy(as->filename, src->filename, baseLen);
+        as->filename[baseLen] = '\0';
+    } else {
+        snprintf(as->filename, sizeof(as->filename), "%.*s (reversed)", (int)(sizeof(as->filename) - 13), src->filename);
+    }
+
+    as->frameCount = fc;
+    sample_install_cached(as, revPcm, fc, hash);
+    as->loaded = true;
+    generate_peak_cache_auto(as);
+    g_Seq.sampleCount++;
+    return newIdx;
+}
+
+// Reverses one or more target sample clips (single or batch) under lock+undo.
+// Groups by source sampleIndex to reverse each unique sample buffer once.
+static inline void reverse_clips_action(const int* targetClips, int targetCount) {
+    if (g_Seq.isBusy) return;
+    if (!targetClips || targetCount <= 0) return;
+
+    push_undo_state();
+    seq_lock();
+
+    float fpb = frames_per_beat(g_Seq.bpm);
+    int remapSample[MAX_SAMPLES];
+    for (int i = 0; i < MAX_SAMPLES; ++i) remapSample[i] = -1;
+
+    for (int i = 0; i < targetCount; ++i) {
+        int cIdx = targetClips[i];
+        if (cIdx < 0 || cIdx >= g_Seq.clipCount) continue;
+        Clip* c = &g_Seq.clips[cIdx];
+        if (c->isMidi) continue;
+        if (c->sampleIndex < 0 || c->sampleIndex >= g_Seq.sampleCount) continue;
+
+        int srcIdx = c->sampleIndex;
+        const AudioSample* src = &g_Seq.samples[srcIdx];
+        if (!src->loaded || !src->pFrames || src->frameCount == 0) continue;
+
+        int revIdx = remapSample[srcIdx];
+        if (revIdx < 0) {
+            revIdx = get_or_create_reversed_sample(srcIdx);
+            if (revIdx < 0) continue;
+            remapSample[srcIdx] = revIdx;
+        }
+
+        // Remap offset around the buffer using the source sample length and effective span
+        c->sampleOffsetFrames = reverse_remap_clip_offset(c, src, fpb);
+        c->sampleIndex = revIdx;
+
+        if (cIdx < MAX_CLIPS) {
+            g_ClipGran[cIdx].sampleIndex = revIdx;
+        }
+        mark_clip_bars_dirty(c);
+    }
+
+    seq_unlock();
+    cseq_clip_structure_changed();
+    invalidate_timeline_cache();
+    if (g_hWnd) InvalidateRect(g_hWnd, NULL, FALSE);
 }
 
 static inline void select_all_clips_on_track(int trackIdx) {

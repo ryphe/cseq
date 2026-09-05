@@ -931,15 +931,13 @@ static inline LRESULT cseq_main_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                         return 0;
                     }
                      
-                    int mstX = zoomX + ctrlW + gap;
-                    if (mx >= mstX && mx <= mstX + ctrlW) {
-                        seq_lock();
-                        g_Seq.masterVolume = 1.0f;
-                        seq_unlock();
-                        InvalidateRect(hwnd, NULL, FALSE);
+                    POINT masterPt = { mx, my };
+                    if (PtInRect(&g_masterVolBtnRect, masterPt) && !job_is_busy()) {
+                        open_master_volume_popup(hwnd);
                         return 0;
                     }
                      
+                    int mstX = zoomX + ctrlW + gap;
                     int modeX = mstX + ctrlW + gap;
                     if (mx >= modeX && mx <= modeX + ctrlW) {
                         seq_lock();
@@ -1295,6 +1293,12 @@ static inline LRESULT cseq_main_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 open_timesig_dialog(hwnd);
                 return 0;
             }
+        }
+
+        POINT masterPt = { mx, my };
+        if (PtInRect(&g_masterVolBtnRect, masterPt) && !job_is_busy()) {
+            open_master_volume_popup(hwnd);
+            return 0;
         }
 
         if (my > get_header_height()) {
@@ -1764,7 +1768,7 @@ static inline LRESULT cseq_main_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                         if (origLen > 0.01f && newLen > 0.01f) {
                             float newRate = g_Seq.resizeOrigRate * (origLen / newLen);
                             if (newRate < 0.01f) newRate = 0.01f;
-                            if (newRate > 2.00f) newRate = 2.00f;
+                            if (newRate > 50.0f) newRate = 50.0f;
                             c->playbackRate = newRate;
                         }
                     }

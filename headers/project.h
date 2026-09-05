@@ -1377,20 +1377,29 @@ static DWORD WINAPI LoadProjectThreadProc(LPVOID lpParam) {
         }
     }
 
-     
+    // forwards/backwards compat
+    // SaveProjectThreadProc already writes fxs.version = CSQ_FX_VERSION, so new saves will automatically use Version 2
     if (isCSQ4) {
         long fxStart = ftell(fp);
         CSQFxSection fxs = { 0 };
         if (fread(&fxs, sizeof(fxs), 1, fp) == 1 &&
             memcmp(fxs.magic, CSQ_FX_MAGIC, 4) == 0 &&
-            fxs.version == CSQ_FX_VERSION &&
+            (fxs.version == CSQ_FX_VERSION_LEGACY || fxs.version == CSQ_FX_VERSION) &&
             fxs.trackCount >= 0 && fxs.trackCount <= MAX_TRACKS) {
             for (int t = 0; t < fxs.trackCount; ++t) {
-                CSQFxChain fc;
-                memset(&fc, 0, sizeof(fc));
-                if (fread(&fc, sizeof(fc), 1, fp) != 1) break;
-                if (fc.count < 0 || fc.count > FX_MAX_SLOTS) continue;
-                fx_chain_load(&g_TrackFx[t], (int)fc.count, fc.slots, &fc.params[0][0], (int)SAMPLE_RATE);
+                if (fxs.version == CSQ_FX_VERSION_LEGACY) {
+                    CSQFxChainV1 fc;
+                    memset(&fc, 0, sizeof(fc));
+                    if (fread(&fc, sizeof(fc), 1, fp) != 1) break;
+                    if (fc.count < 0 || fc.count > 8) continue;
+                    fx_chain_load(&g_TrackFx[t], (int)fc.count, fc.slots, &fc.params[0][0], (int)SAMPLE_RATE);
+                } else {
+                    CSQFxChain fc;
+                    memset(&fc, 0, sizeof(fc));
+                    if (fread(&fc, sizeof(fc), 1, fp) != 1) break;
+                    if (fc.count < 0 || fc.count > FX_MAX_SLOTS) continue;
+                    fx_chain_load(&g_TrackFx[t], (int)fc.count, fc.slots, &fc.params[0][0], (int)SAMPLE_RATE);
+                }
             }
         } else {
             fseek(fp, fxStart, SEEK_SET);

@@ -10,6 +10,10 @@ extern HFONT g_hFontUI;
 extern SequencerState g_Seq;
 extern HWND g_hWnd;
 
+// Hit-rect of the bottom-dock "Master" volume button, updated every frame by
+// render_ui() so WM_LBUTTONDOWN can test the click without re-deriving layout.
+extern RECT g_masterVolBtnRect;
+
 extern GranularEngine g_TrackGran[MAX_TRACKS];
 extern GranularEngine g_ClipGran[MAX_CLIPS];
 

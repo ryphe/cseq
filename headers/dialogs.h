@@ -13,6 +13,27 @@
 #include <stdbool.h>
 #include <math.h>
 
+// FX rack UI interaction state (defined at the bottom of this file where the
+// rack is implemented; type is hoisted here so reset_to_init_state can clear
+// its selection without a forward mess).
+typedef struct {
+    bool  dragging;
+    bool  fromChain;
+    int   index;
+    int   startX, startY;
+    int   dragX, dragY;
+    bool  moved;
+    bool  overRemove;
+    int   dropSlot;
+    int   selectedSlot;
+    int   dragParam;
+    bool  paramIsKnob;
+    bool  knobIsLog;
+    int   knobStartX, knobStartY;
+    float knobStartVal;
+} FxRackUiState;
+extern FxRackUiState g_fxRackUi;
+
  
 static inline void save_project_to_csq(const char* path);
 static inline void save_project_dialog(HWND hwnd);
@@ -173,10 +194,19 @@ static inline void reset_to_init_state(void) {
         track_filter_init_defaults(&g_Seq.trackFilter[t]);
     }
 
+    // Wipe all track FX chains (the pre-reset state survives in the undo
+    // snapshot pushed above, so Ctrl+Z restores it).
+    fx_init_all();
+
     g_Seq.rateUndoDebounceTimer = 0;
 
 
     seq_unlock();
+
+    g_fxRackUi.selectedSlot = -1;
+    if (g_fxRackHwnd && IsWindow(g_fxRackHwnd)) {
+        InvalidateRect(g_fxRackHwnd, NULL, FALSE);
+    }
 
     cseq_clip_structure_changed();
     mark_all_bars_dirty();
@@ -559,7 +589,7 @@ static const KeybindRow kKeybindList[] = {
     { "Shift + Wheel",          "Adjust clip playback rate" },
     { "Shift + Middle Drag",    "Faster timeline viewport pan" },
     { "Alt + Drag Clip",        "Slip edit clip audio frames" },
-    { "Shift + Drag Clip",      "Adjust clip volume" },
+    { "Shift + Drag Clip",      "Adjust clip volume/rate (edge)" },
     { "Shift + Drag Track",     "Adjust track ordering" },
     { "Ctrl + Scroll",          "Zoom timeline viewport" },
     { "Ctrl + S / O",           "Save / Load project file" },
@@ -990,7 +1020,7 @@ static inline void open_track_pan_width_dialog(HWND parentHwnd, int trackIdx) {
             s_registered = true;
         }
 
-        int rw = 420, rh = 200;    
+int rw = 420, rh = 200;
         int scrW = GetSystemMetrics(SM_CXSCREEN), scrH = GetSystemMetrics(SM_CYSCREEN);
         int rx = (scrW - rw) / 2, ry = (scrH - rh) / 2;
 
@@ -4771,6 +4801,13 @@ static inline void midi_edit_get_note_name(int midiNote, char* outBuf, size_t bu
 static const char kMidiHintText[] =
     "[L/R Drag] Select | [Click] Add/Delete | [Wheel] Velocity | [ESC] Close";
 
+// "Keyboard" audition toggle (bottom-bar button right of the Octave button).
+// Off by default; when on, QWERTY keys sound notes while the window is
+// focused. Mouse strip audition and keyboard audition share one polyphonic
+// held-note set (MidiEditContext.auditionNotes, union built in types.h), so
+// both can sound up to MIDI_KB_MAX notes at once.
+static bool g_midiKbMode = false;
+
  
 static HDC     g_midiCacheDC      = NULL;
 static HBITMAP g_midiCacheBmp     = NULL;
@@ -4832,16 +4869,22 @@ static inline int midi_edit_get_note_under_mouse(const Clip* c, int mx, int my, 
 
         int nx1 = gridX + (int)(n->startBeat * ppb);
         int nw = (int)(n->lengthBeats * ppb);
-        if (nw < 6) nw = 6;
+        // Minimum *click* width: very short notes render at 6px, but the grab
+        // box stays comfortably wide so they don't become impossible to hit.
+        if (nw < 8) nw = 8;
         int nx2 = nx1 + nw;
         int ny1 = rollY + (int)(row * rowH) + 1;
         int ny2 = rollY + (int)((row + 1) * rowH) - 1;
 
-        if (mx >= nx1 - 5 && mx <= nx2 + 5 && my >= ny1 && my <= ny2) {
+        if (mx >= nx1 - 6 && mx <= nx2 + 6 && my >= ny1 && my <= ny2) {
             if (outEdge) {
-                if (mx < nx1 + 5) *outEdge = 1;         
-                else if (mx > nx2 - 5) *outEdge = 2;    
-                else *outEdge = 0;                      
+                // Resize handles only take the outer few pixels so the note
+                // body stays grabbable for moving instead of every near-edge
+                // click starting a resize.
+                int edgeW = (nw >= 16) ? 4 : 3;
+                if (mx < nx1 + edgeW) *outEdge = 1;
+                else if (mx > nx2 - edgeW) *outEdge = 2;
+                else *outEdge = 0;
             }
             return i;
         }
@@ -5169,6 +5212,7 @@ static inline void update_midi_piano_roll_cache(HWND hwnd, HDC hdc, int w, int h
     int btnH = scale_y(20);
     RECT clrRc = { scale_x(14), botY, scale_x(100), botY + btnH };
     RECT octRc = { scale_x(106), botY, scale_x(210), botY + btnH };
+    RECT kbRc  = { scale_x(216), botY, scale_x(310), botY + btnH };
 
     HBRUSH btnBr = CreateSolidBrush(RGB(26, 32, 42));
     HPEN btnPn = CreatePen(PS_SOLID, 1, RGB(48, 58, 72));
@@ -5176,6 +5220,20 @@ static inline void update_midi_piano_roll_cache(HWND hwnd, HDC hdc, int w, int h
     HGDIOBJ op = SelectObject(dc, btnPn);
     RoundRect(dc, clrRc.left, clrRc.top, clrRc.right, clrRc.bottom, 3, 3);
     RoundRect(dc, octRc.left, octRc.top, octRc.right, octRc.bottom, 3, 3);
+    // Keyboard button: green when enabled (audition via QWERTY keys).
+    if (g_midiKbMode) {
+        HBRUSH kbBg = CreateSolidBrush(RGB(22, 90, 55));
+        HPEN kbPn  = CreatePen(PS_SOLID, 1, RGB(80, 240, 180));
+        SelectObject(dc, kbBg);
+        SelectObject(dc, kbPn);
+        RoundRect(dc, kbRc.left, kbRc.top, kbRc.right, kbRc.bottom, 3, 3);
+        SelectObject(dc, op);
+        SelectObject(dc, ob);
+        DeleteObject(kbPn);
+        DeleteObject(kbBg);
+    } else {
+        RoundRect(dc, kbRc.left, kbRc.top, kbRc.right, kbRc.bottom, 3, 3);
+    }
     SelectObject(dc, op);
     SelectObject(dc, ob);
     DeleteObject(btnPn); DeleteObject(btnBr);
@@ -5192,11 +5250,19 @@ static inline void update_midi_piano_roll_cache(HWND hwnd, HDC hdc, int w, int h
     SetTextColor(dc, accent);
     DrawTextA(dc, octBuf, -1, &octRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
+    SetTextColor(dc, g_midiKbMode ? RGB(160, 255, 205) : RGB(140, 155, 175));
+    DrawTextA(dc, "Keyboard", -1, &kbRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
      
-    int minHintX = octRc.right + scale_x(12);
+    int minHintX = kbRc.right + scale_x(12);
     RECT hintRc = { minHintX, botY + 1, w - scale_x(14), botY + btnH };
     SetTextColor(dc, RGB(140, 155, 175));
-    DrawTextA(dc, kMidiHintText,
+    const char* hintTxt = g_midiKbMode
+        ? (midi_edit_is_quadrum()
+           ? "Keys: A W S E D F T G (8 voices)"
+           : "Keys: A W S E D F T G Y H U J K O L P")
+        : kMidiHintText;
+    DrawTextA(dc, hintTxt,
               -1, &hintRc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
     SelectObject(dc, oldFont);
@@ -5285,12 +5351,18 @@ static inline void draw_midi_dynamic_overlays(HWND hwnd, HDC dc, int w, int h, C
     SetBkMode(dc, TRANSPARENT);
 
      
+    // Snapshot the polyphonic held set: mouse strip + keyboard keys + PLAY
+    // loop (auditionNote = last-pressed for paint, auditionHeld = set active).
+    int  snapHeldNotes[MIDI_KB_MAX];
+    int  snapHeldCount = 0;
     midi_lock();
-    bool   snapAudition = g_midiEdit.isAuditionPlaying;
-    int    snapHeldNote = g_midiEdit.auditionNote;
-    bool   snapHeld     = g_midiEdit.auditionHeld;
+    bool snapAudition = g_midiEdit.isAuditionPlaying;
+    snapHeldCount = g_midiEdit.auditionNoteCount;
+    if (snapHeldCount > MIDI_KB_MAX) snapHeldCount = MIDI_KB_MAX;
+    for (int i = 0; i < snapHeldCount; ++i) snapHeldNotes[i] = g_midiEdit.auditionNotes[i];
     double snapAudBeat  = g_midiEdit.auditionPlayheadBeat;
     midi_unlock();
+    const bool snapHeld = (snapHeldCount > 0);
 
     int keysX, keysW, gridX, gridW, rollY, rollH;
     midi_edit_geom(hwnd, &keysX, &keysW, &gridX, &gridW, &rollY, &rollH);
@@ -5452,9 +5524,12 @@ static inline void draw_midi_dynamic_overlays(HWND hwnd, HDC dc, int w, int h, C
     (void)w; (void)h;
 
      
+    // Highlight every held key (polyphonic chords highlight all rows).
     if (snapHeld) {
-        int row = midi_edit_pitch_to_row(snapHeldNote);
-        if (row >= 0 && row < midi_edit_key_count()) {
+        for (int hh = 0; hh < snapHeldCount; ++hh) {
+            int held = snapHeldNotes[hh];
+            int row = midi_edit_pitch_to_row(held);
+            if (row < 0 || row >= midi_edit_key_count()) continue;
             int ky1 = rollY + (int)(row * rowH);
             int ky2 = rollY + (int)((row + 1) * rowH);
             RECT kr = { keysX, ky1, keysX + keysW, ky2 };
@@ -5465,9 +5540,9 @@ static inline void draw_midi_dynamic_overlays(HWND hwnd, HDC dc, int w, int h, C
             if (ky2 - ky1 > 9) {
                 char nName[24];
                 if (midi_edit_is_quadrum()) {
-                    snprintf(nName, sizeof(nName), "%s", kQuadrumVoiceNames[snapHeldNote & 7]);
+                    snprintf(nName, sizeof(nName), "%s", kQuadrumVoiceNames[held & 7]);
                 } else {
-                    midi_edit_get_note_name(snapHeldNote, nName, sizeof(nName));
+                    midi_edit_get_note_name(held, nName, sizeof(nName));
                 }
                 SetTextColor(dc, RGB(10, 15, 20));
                 DrawTextA(dc, nName, -1, &kr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
@@ -5788,7 +5863,7 @@ static LRESULT CALLBACK MidiEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                 if (GetTextExtentPoint32A(mdc, kMidiHintText,
                                           (int)strlen(kMidiHintText), &sz)) {
                      
-                    int needed = scale_x(222) + sz.cx + scale_x(14);
+                    int needed = scale_x(322) + sz.cx + scale_x(14);
                     if (needed > minWidth) minWidth = needed;
                 }
                 SelectObject(mdc, oldF);
@@ -5929,6 +6004,26 @@ static LRESULT CALLBACK MidiEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                     InvalidateRect(hwnd, NULL, FALSE);
                     if (g_hWnd) InvalidateRect(g_hWnd, NULL, FALSE);
                     return 0; // Consumed by ADSR knob
+                }
+            }
+
+            // --- OCTAVE BUTTON: wheel over the button shifts octaves ---
+            // (1 step per notch; up = one octave up, down = one octave down)
+            {
+                RECT rcW; GetClientRect(hwnd, &rcW);
+                int botY = (rcW.bottom - rcW.top) - scale_y(26);
+                int btnH = scale_y(20);
+                if (pt.x >= scale_x(106) && pt.x <= scale_x(210) && pt.y >= botY && pt.y <= botY + btnH) {
+                    if (!midi_edit_is_quadrum()) {   // Quadrum has fixed voices
+                        int dir = (zDelta > 0) ? 1 : -1;
+                        midi_lock();
+                        if (g_midiEdit.octaveShift < 3 && dir > 0) g_midiEdit.octaveShift++;
+                        if (g_midiEdit.octaveShift > -3 && dir < 0) g_midiEdit.octaveShift--;
+                        midi_unlock();
+                        invalidate_midi_cache();
+                    }
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    return 0;
                 }
             }
 
@@ -6242,6 +6337,19 @@ static LRESULT CALLBACK MidiEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                         InvalidateRect(hwnd, NULL, FALSE);
                         return 0;
                     }
+                    if (mx >= scale_x(216) && mx <= scale_x(310)) {
+                        g_midiKbMode = !g_midiKbMode;
+                        if (g_midiKbMode) {
+                            SetFocus(hwnd);
+                        } else {
+                            midi_lock();
+                            midi_audition_clear_poly();
+                            midi_unlock();
+                        }
+                        invalidate_midi_cache();
+                        InvalidateRect(hwnd, NULL, FALSE);
+                        return 0;
+                    }
                 }
             }
 
@@ -6256,9 +6364,9 @@ static LRESULT CALLBACK MidiEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                 int row = (int)((my - rollY) / rowH);
                 if (row < 0) row = 0;
                 if (row >= midi_edit_key_count()) row = midi_edit_key_count() - 1;
+                int pitch = midi_edit_row_to_pitch(row);
                 midi_lock();
-                g_midiEdit.auditionNote = midi_edit_row_to_pitch(row);
-                g_midiEdit.auditionHeld = true;
+                midi_audition_set_mouse(pitch);
                 midi_unlock();
                 SetCapture(hwnd);
                 InvalidateRect(hwnd, NULL, FALSE);
@@ -6472,8 +6580,8 @@ static LRESULT CALLBACK MidiEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                 int pitch = midi_edit_row_to_pitch(row);
                 bool changed = false;
                 midi_lock();
-                if (pitch != g_midiEdit.auditionNote) {
-                    g_midiEdit.auditionNote = pitch;
+                if (pitch != g_midiEdit.mousePitch) {
+                    midi_audition_set_mouse(pitch);
                     changed = true;
                 }
                 midi_unlock();
@@ -6641,8 +6749,7 @@ static LRESULT CALLBACK MidiEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
 
              
             midi_lock();
-            g_midiEdit.auditionNote = 0;
-            g_midiEdit.auditionHeld = false;
+            midi_audition_set_mouse(-1);
             midi_unlock();
 
              
@@ -6668,9 +6775,16 @@ static LRESULT CALLBACK MidiEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                     float ppb = (float)gridW / clipLen;
 
                     float clickBeat = (float)(g_midiEdit.dragStartX - gridX) / ppb;
-                    float startBeat = quantize_beat_16th(clickBeat);
+                    // Snap DOWN to the clicked grid cell so the note lands
+                    // where the user clicked (round-half-up would push hits in
+                    // the right half of a cell one cell to the right).
+                    float startBeat = quantize_beat_floor(clickBeat);
                     float len = quantize_beat_16th(0.25f);
                     if (len < 0.05f) len = 0.05f;
+                    // Boundary check: the placed note must sit entirely inside
+                    // [0, clipLen] and stay at least min-len long.
+                    if (startBeat < 0.0f) startBeat = 0.0f;
+                    if (len > clipLen) len = clipLen;
                     if (startBeat >= clipLen) startBeat = clipLen - len;
                     if (startBeat < 0.0f) startBeat = 0.0f;
                     if (startBeat + len > clipLen) len = clipLen - startBeat;
@@ -6736,8 +6850,7 @@ static LRESULT CALLBACK MidiEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         case WM_KEYDOWN: {
             if (wParam == VK_ESCAPE) {
                 midi_lock();
-                g_midiEdit.auditionNote = 0;
-                g_midiEdit.auditionHeld = false;
+                midi_audition_clear_poly();
                 g_midiEdit.isAuditionPlaying = false;
                 midi_unlock();
                 ShowWindow(hwnd, SW_HIDE);
@@ -6798,6 +6911,23 @@ static LRESULT CALLBACK MidiEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                 if (ok && g_hWnd) InvalidateRect(g_hWnd, NULL, FALSE);
                 return 0;
             }
+            // Keyboard note audition (A-P QWERTY row, relative to the roll's
+            // current octave; Quadrum maps to its 8 drum voices). Only fires
+            // when the toggle is on and no modifiers are held. Notes join the
+            // same polyphonic held-set as the mouse strip, so keyboard and
+            // mouse clicks/chords coexist up to MIDI_KB_MAX voices.
+            if (g_midiKbMode) {
+                int semi = pr_key_to_semitone((int)wParam);
+                if (semi >= 0) {
+                    int pitch = midi_edit_is_quadrum() ? (semi % 8)
+                                                       : (midi_edit_get_base_note() + semi);
+                    midi_lock();
+                    midi_audition_kb_add((int)wParam, pitch);
+                    midi_unlock();
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    return 0;
+                }
+            }
             // 'V' (no ctrl): randomize the velocity of every present note.
             if (!ctrl && wParam == 'V') {
                 if (c->midiNoteCount > 0) {
@@ -6835,14 +6965,27 @@ static LRESULT CALLBACK MidiEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
             return 0;
         }
 
+        case WM_KEYUP: {
+            // Release by the physical key: each entry's pitch was resolved at
+            // press time, so re-resolving here (current octave) could miss
+            // the entry and strand the held note.
+            if (g_midiKbMode && pr_key_to_semitone((int)wParam) >= 0) {
+                midi_lock();
+                midi_audition_kb_remove((int)wParam);
+                midi_unlock();
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+            break;
+        }
+
         case WM_CLOSE:
             // Stop any preview that was playing before hiding, so a Halo /
             // Quadrum / MIDI audition doesn't keep sounding after the modal is
             // closed via the title bar (WM_DESTROY never runs on a hide-only
             // close, and the audio thread keeps looping while audHeld/playing).
             midi_lock();
-            g_midiEdit.auditionNote = 0;
-            g_midiEdit.auditionHeld = false;
+            midi_audition_clear_poly();
             g_midiEdit.isAuditionPlaying = false;
             midi_unlock();
             // Closing the piano roll also closes the synth interface popup.
@@ -6873,8 +7016,7 @@ static LRESULT CALLBACK MidiEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
             g_midiEdit.dragMode = MIDI_DRAG_NONE;
             g_midiEdit.dragNote = -1;
             g_midiEdit.selNote = -1;
-            g_midiEdit.auditionNote = 0;
-            g_midiEdit.auditionHeld = false;
+            midi_audition_clear_poly();
             g_midiEdit.isAuditionPlaying = false;
             g_midiEdit.isMarqueeSelecting = false;
             g_midiEdit.isCtrlDuplicating = false;
@@ -6931,8 +7073,7 @@ static inline void open_midi_editor(HWND parentHwnd, int clipIdx) {
     g_midiEdit.dragMode = MIDI_DRAG_NONE;
     g_midiEdit.dragNote = -1;
     g_midiEdit.adsrDragKnob = -1;   // no ADSR knob drag until one is grabbed
-    g_midiEdit.auditionNote = 0;
-    g_midiEdit.auditionHeld = false;
+    midi_audition_clear_poly();
     g_midiEdit.isAuditionPlaying = false;
     g_midiEdit.auditionPlayheadBeat = 0.0;
     g_midiEdit.isMarqueeSelecting = false;
@@ -8924,8 +9065,12 @@ static inline void show_clip_context_menu(HWND hwnd, int clipIdx, int screenX, i
             char batchLabel[64];
             snprintf(batchLabel, sizeof(batchLabel), "Batch Slice... (%d clips)", sliceTargetCount);
             AppendMenuA(hMenu, MF_STRING, ID_CLIP_SLICE, batchLabel);
+            char batchRevLabel[64];
+            snprintf(batchRevLabel, sizeof(batchRevLabel), "Batch Reverse... (%d clips)", sliceTargetCount);
+            AppendMenuA(hMenu, MF_STRING, ID_CLIP_REVERSE, batchRevLabel);
         } else {
             AppendMenuA(hMenu, MF_STRING, ID_CLIP_SLICE, "Slice...");
+            AppendMenuA(hMenu, MF_STRING, ID_CLIP_REVERSE, "Reverse");
         }
     }
 
@@ -8981,6 +9126,10 @@ static inline void show_clip_context_menu(HWND hwnd, int clipIdx, int screenX, i
     }
     if (cmd == ID_CLIP_SLICE) {
         open_slice_dialog(hwnd, sliceTargets, sliceTargetCount, screenX, screenY);
+        return;
+    }
+    if (cmd == ID_CLIP_REVERSE) {
+        reverse_clips_action(sliceTargets, sliceTargetCount);
         return;
     }
 
@@ -9074,7 +9223,7 @@ static inline void show_clip_context_menu(HWND hwnd, int clipIdx, int screenX, i
 }
 
  
-static HWND g_fxRackHwnd = NULL;
+HWND g_fxRackHwnd = NULL;
 static int  g_fxTrack = -1;
 
  
@@ -9292,23 +9441,7 @@ static inline void fx_draw_aa_knob(HDC hdc, int cx, int cy, float radius, float 
     DeleteDC(memDC);
 }
 
-typedef struct {
-    bool  dragging;
-    bool  fromChain;       
-    int   index;           
-    int   startX, startY;
-    int   dragX, dragY;    
-    bool  moved;
-    bool  overRemove;      
-    int   dropSlot;        
-    int   selectedSlot;    
-    int   dragParam;       
-    bool  paramIsKnob;
-    bool  knobIsLog;       // active knob drag moves in normalized log space
-    int   knobStartX, knobStartY;
-    float knobStartVal;
-} FxRackUiState;
-static FxRackUiState g_fxRackUi = { 0 };
+FxRackUiState g_fxRackUi = { 0 };
 
  
 static void fx_rack_notify_main(void) {
@@ -9339,6 +9472,9 @@ static const char* fx_module_hint(int type) {
         case FX_TYPE_CHORUS:     return "doubler/wide";
         case FX_TYPE_COMPRESSOR: return "VCA/glue";
         case FX_TYPE_RESONATOR:  return "ring/tone";
+        case FX_TYPE_TREMOLO:    return "pulse/vibe";
+        case FX_TYPE_AUTOPAN:    return "stereo/pan";
+        case FX_TYPE_FLANGER:    return "jet/flange";
         default:                 return "";
     }
 }
@@ -9360,13 +9496,16 @@ static inline void fx_rack_layout(HWND hwnd, FxRackLayout* L) {
     int paramH = scale_y(112);
     int leftW = scale_x(176);
     int gap = scale_x(12);
-    int panesBottom = L->h - pad - paramH - scale_y(10);
-    SetRect(&L->leftPane,  pad, headerH, pad + leftW, panesBottom);
-    // Size the chain pane to exactly fit FX_MAX_SLOTS rows (2px pad top/bottom)
-    // so the 8 slots fill the list with no empty black space at the bottom.
-    int chainH = 2 + FX_MAX_SLOTS * L->rowH + 2;
-    SetRect(&L->chainPane, L->leftPane.right + gap, headerH, L->w - pad, headerH + chainH);
-    SetRect(&L->paramStrip, pad, L->h - pad - paramH, L->w - pad, L->h - pad);
+
+    // Compute heights based on row count
+    int leftH  = 2 + FX_DESCRIPTOR_COUNT * L->rowH + 2;
+    int chainH = 2 + FX_MAX_SLOTS        * L->rowH + 2;
+    // Align both panes to whichever is taller (flush bottoms)
+    int panesH = (leftH > chainH) ? leftH : chainH;
+
+    SetRect(&L->leftPane,   pad, headerH, pad + leftW, headerH + panesH);
+    SetRect(&L->chainPane,  L->leftPane.right + gap, headerH, L->w - pad, headerH + panesH);
+    SetRect(&L->paramStrip, pad, headerH + panesH + scale_y(10), L->w - pad, headerH + panesH + scale_y(10) + paramH);
 }
 
 static inline void fx_rack_clear_btn_rect(const FxRackLayout* L, RECT* r) {
@@ -9720,10 +9859,12 @@ static LRESULT CALLBACK FxRackWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                     if (pt.x >= cell.left && pt.x <= cell.right) {
                         const FxParamDef* pd = &sd->params[p];
                         if (pd->kind == FX_PARAM_TOGGLE) {
+                            push_undo_state();
                             seq_lock();
                             sfx->params[p] = (sfx->params[p] > 0.5f) ? 0.0f : 1.0f;
                             seq_unlock();
                         } else {
+                            push_undo_state();
                             float stepVal;
                             if (pd->kind == FX_PARAM_KNOB_LOG) {
                                 // Step in normalized log space so wheel sweeps
@@ -9767,6 +9908,7 @@ static LRESULT CALLBACK FxRackWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             fx_rack_clear_btn_rect(&L, &btn);
             if (mx >= btn.left && mx <= btn.right && my >= btn.top && my <= btn.bottom) {
                 if (chain->count > 0) {
+                    push_undo_state();
                     seq_lock();
                     fx_chain_clear(chain);
                     seq_unlock();
@@ -9812,6 +9954,7 @@ static LRESULT CALLBACK FxRackWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 }
                 if (pd->kind == FX_PARAM_TOGGLE) {
                     if (my >= cell.top && my <= cell.bottom) {
+                        push_undo_state();
                         seq_lock();
                         sfx->params[p] = (sfx->params[p] > 0.5f) ? 0.0f : 1.0f;
                         seq_unlock();
@@ -9827,6 +9970,7 @@ static LRESULT CALLBACK FxRackWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                     float norm = (float)(mx - railX) / (float)railW;
                     if (norm < 0.0f) norm = 0.0f;
                     if (norm > 1.0f) norm = 1.0f;
+                    push_undo_state();
                     seq_lock();
                     sfx->params[p] = pd->min + norm * (pd->max - pd->min);
                     seq_unlock();
@@ -9900,7 +10044,10 @@ static LRESULT CALLBACK FxRackWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 FxInstance* sfx = &chain->slots[g_fxRackUi.selectedSlot];
                 float v = sfx->params[g_fxRackUi.dragParam];
                 if (g_fxRackUi.paramIsKnob) {
-                    g_fxRackUi.moved = true;
+                    if (!g_fxRackUi.moved) {
+                        push_undo_state();
+                        g_fxRackUi.moved = true;
+                    }
                     int delta = (g_fxRackUi.knobStartY - my) + (mx - g_fxRackUi.knobStartX);
                     if (g_fxRackUi.knobIsLog) {
                         // knobStartVal holds the normalized log position.
@@ -9996,6 +10143,7 @@ static LRESULT CALLBACK FxRackWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                                   pt.y >= L.chainPane.top && pt.y <= L.chainPane.bottom);
                 if (fromChain && overLeft && src >= 0 && src < chain->count) {
                      
+                    push_undo_state();
                     seq_lock();
                     fx_chain_remove_at(chain, src);
                     seq_unlock();
@@ -10006,6 +10154,7 @@ static LRESULT CALLBACK FxRackWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                     if (!fromChain) {
                         const FxDescriptor* d = fx_descriptor_by_index(src);
                         if (d && chain->count < FX_MAX_SLOTS) {
+                            push_undo_state();
                             seq_lock();
                             if (fx_chain_insert(chain, d, slot, (int)SAMPLE_RATE)) {
                                 g_fxRackUi.selectedSlot = slot;
@@ -10017,16 +10166,20 @@ static LRESULT CALLBACK FxRackWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                         int to = (slot > src) ? slot - 1 : slot;
                         if (to < 0) to = 0;
                         if (to > chain->count - 1) to = chain->count - 1;
-                        seq_lock();
-                        fx_chain_move(chain, src, to);
-                        seq_unlock();
-                        g_fxRackUi.selectedSlot = to;
+                        if (to != src) {
+                            push_undo_state();
+                            seq_lock();
+                            fx_chain_move(chain, src, to);
+                            seq_unlock();
+                            g_fxRackUi.selectedSlot = to;
+                        }
                     }
                 }
             } else if (!fromChain) {
                  
                 const FxDescriptor* d = fx_descriptor_by_index(src);
                 if (d && chain->count < FX_MAX_SLOTS) {
+                    push_undo_state();
                     seq_lock();
                     if (fx_chain_insert(chain, d, chain->count, (int)SAMPLE_RATE)) {
                         g_fxRackUi.selectedSlot = chain->count - 1;
@@ -10057,6 +10210,7 @@ static LRESULT CALLBACK FxRackWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             my >= L.chainPane.top && my <= L.chainPane.bottom) {
             int row = (my - L.chainPane.top - 2) / L.rowH;
             if (row >= 0 && row < chain->count) {
+                push_undo_state();
                 seq_lock();
                 fx_chain_remove_at(chain, row);
                 seq_unlock();
@@ -10076,6 +10230,17 @@ static LRESULT CALLBACK FxRackWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         g_fxRackUi.overRemove = false;
         return 0;
     case WM_KEYDOWN:
+        if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'Z') {
+            if (GetKeyState(VK_SHIFT) & 0x8000) redo_last_action();
+            else undo_last_action();
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+        if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'Y') {
+            redo_last_action();
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
         if (wParam == VK_ESCAPE) {
             ShowWindow(hwnd, SW_HIDE);
             return 0;
@@ -10085,6 +10250,7 @@ static LRESULT CALLBACK FxRackWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             FxChain* chain = (g_fxTrack >= 0 && g_fxTrack < MAX_TRACKS) ? &g_TrackFx[g_fxTrack] : NULL;
             if (chain && g_fxRackUi.selectedSlot >= 0 && g_fxRackUi.selectedSlot < chain->count) {
                 int row = g_fxRackUi.selectedSlot;
+                push_undo_state();
                 seq_lock();
                 fx_chain_remove_at(chain, row);
                 seq_unlock();
@@ -10130,7 +10296,7 @@ static inline void open_fx_rack_dialog(HWND parentHwnd, int trackIdx) {
             s_registered = true;
         }
 
-        int rw = scale_x(560), rh = scale_y(440);
+        int rw = scale_x(560), rh = scale_y(520);
         int scrW = GetSystemMetrics(SM_CXSCREEN);
         int scrH = GetSystemMetrics(SM_CYSCREEN);
 
@@ -10598,4 +10764,252 @@ static inline void show_track_context_menu(HWND hwnd, int trackIdx, int screenX,
 
     seq_unlock();
     InvalidateRect(hwnd, NULL, FALSE);
+}
+
+// --- Master Volume dialog (modeless popup slider) --------------------------
+// A single supersampled AA-capsule slider (0%..150%) with a preview value that
+// lives only in this popup; it is committed to g_Seq.masterVolume (under
+// seq_lock) on ENTER, and discarded on ESC / click-outside.
+// No seq_lock is taken during a drag: the slider only previews the value.
+typedef struct {
+    HWND   hwnd;
+    float  local;        // live preview value in [0.0, 1.5]
+    bool   isDragging;
+} MasterVolWindowContext;
+static MasterVolWindowContext g_MasterVolWin = { 0 };
+
+#define MASTER_VOL_RANGE_LO 0.0f
+#define MASTER_VOL_RANGE_HI 1.5f
+
+static inline void mastervol_track_bounds(HWND hwnd, int* outLeft, int* outRight) {
+    RECT rc; GetClientRect(hwnd, &rc);
+    *outLeft  = 24;
+    *outRight = rc.right - 24;
+}
+
+static inline void mastervol_commit(HWND hwnd) {
+    float v = g_MasterVolWin.local;
+    if (v < MASTER_VOL_RANGE_LO) v = MASTER_VOL_RANGE_LO;
+    if (v > MASTER_VOL_RANGE_HI) v = MASTER_VOL_RANGE_HI;
+    seq_lock();
+    g_Seq.masterVolume = v;
+    g_Seq.isModified = true;
+    seq_unlock();
+    update_window_title();
+    if (g_hWnd) InvalidateRect(g_hWnd, NULL, FALSE);
+    DestroyWindow(hwnd);
+}
+
+static inline void mastervol_cancel(HWND hwnd) {
+    DestroyWindow(hwnd);
+}
+
+static LRESULT CALLBACK MasterVolWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;
+
+    case WM_ACTIVATE:
+        // Click-outside (WA_INACTIVE) cancels the popup: destroy, no write-back.
+        if (LOWORD(wParam) == WA_INACTIVE) {
+            mastervol_cancel(hwnd);
+            return 0;
+        }
+        break;
+
+    case WM_LBUTTONDOWN: {
+        int mx = GET_X_LPARAM(lParam);
+        int my = GET_Y_LPARAM(lParam);
+        int trackLeft, trackRight;
+        mastervol_track_bounds(hwnd, &trackLeft, &trackRight);
+        int trackW = trackRight - trackLeft;
+        if (my >= 42 && my <= 72 && mx >= trackLeft && mx <= trackRight && trackW > 0) {
+            float norm = (float)(mx - trackLeft) / (float)trackW;
+            if (norm < 0.0f) norm = 0.0f;
+            if (norm > 1.0f) norm = 1.0f;
+            g_MasterVolWin.local = MASTER_VOL_RANGE_LO + norm * (MASTER_VOL_RANGE_HI - MASTER_VOL_RANGE_LO);
+            g_MasterVolWin.isDragging = true;
+            SetCapture(hwnd);
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        return 0;
+    }
+
+    case WM_MOUSEMOVE: {
+        if (g_MasterVolWin.isDragging) {
+            int mx = GET_X_LPARAM(lParam);
+            int trackLeft, trackRight;
+            mastervol_track_bounds(hwnd, &trackLeft, &trackRight);
+            int trackW = trackRight - trackLeft;
+            if (trackW > 0) {
+                float norm = (float)(mx - trackLeft) / (float)trackW;
+                if (norm < 0.0f) norm = 0.0f;
+                if (norm > 1.0f) norm = 1.0f;
+                g_MasterVolWin.local = MASTER_VOL_RANGE_LO + norm * (MASTER_VOL_RANGE_HI - MASTER_VOL_RANGE_LO);
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+        }
+        return 0;
+    }
+
+    case WM_MOUSEWHEEL: {
+        short zDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+        float step = (zDelta > 0) ? 0.05f : -0.05f;
+        g_MasterVolWin.local += step;
+        if (g_MasterVolWin.local < MASTER_VOL_RANGE_LO) g_MasterVolWin.local = MASTER_VOL_RANGE_LO;
+        if (g_MasterVolWin.local > MASTER_VOL_RANGE_HI) g_MasterVolWin.local = MASTER_VOL_RANGE_HI;
+        InvalidateRect(hwnd, NULL, FALSE);
+        return 0;
+    }
+
+    case WM_LBUTTONUP:
+        if (g_MasterVolWin.isDragging) {
+            g_MasterVolWin.isDragging = false;
+            ReleaseCapture();
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        return 0;
+
+    case WM_RBUTTONDOWN: {
+        g_MasterVolWin.local = 1.0f;   // right-click resets to 100%
+        InvalidateRect(hwnd, NULL, FALSE);
+        return 0;
+    }
+
+    case WM_KEYDOWN:
+        if (wParam == VK_RETURN) {
+            mastervol_commit(hwnd);
+            return 0;
+        }
+        if (wParam == VK_ESCAPE) {
+            mastervol_cancel(hwnd);
+            return 0;
+        }
+        break;
+
+    case WM_CLOSE:
+        mastervol_cancel(hwnd);
+        return 0;
+
+    case WM_DESTROY:
+        g_MasterVolWin.hwnd = NULL;
+        g_MasterVolWin.isDragging = false;
+        return 0;
+
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        HFONT oldFontMain = SELECT_UI_FONT(hdc);
+        RECT rc; GetClientRect(hwnd, &rc);
+        int w = rc.right - rc.left, h = rc.bottom - rc.top;
+        if (w <= 0 || h <= 0) {
+            SelectObject(hdc, oldFontMain);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+
+        // Double-buffered GDI: offscreen bitmap redrawn only when invalidated.
+        HDC memDC = CreateCompatibleDC(hdc);
+        HBITMAP memBmp = CreateCompatibleBitmap(hdc, w, h);
+        HGDIOBJ oldBmp = SelectObject(memDC, memBmp);
+        HFONT oldFontMem = SELECT_UI_FONT(memDC);
+
+        HBRUSH bg = CreateSolidBrush(RGB(17, 20, 26));
+        FillRect(memDC, &rc, bg);
+        DeleteObject(bg);
+
+        int trackLeft = 24, trackRight = w - 24;
+        int trackW = trackRight - trackLeft;
+        int trackY = 56;
+
+        // Supersampled AA capsule track + fill (same style as FX rack popups).
+        fx_draw_aa_capsule(memDC, (float)trackLeft, (float)trackY,
+                           (float)trackRight, (float)trackY, 2.5f, RGB(30, 36, 46));
+
+        float norm = (g_MasterVolWin.local - MASTER_VOL_RANGE_LO) /
+                     (MASTER_VOL_RANGE_HI - MASTER_VOL_RANGE_LO);
+        if (norm < 0.0f) norm = 0.0f;
+        if (norm > 1.0f) norm = 1.0f;
+        int fillX = trackLeft + (int)(norm * (float)trackW);
+        if (fillX > trackLeft)
+            fx_draw_aa_capsule(memDC, (float)trackLeft, (float)trackY,
+                               (float)fillX, (float)trackY, 2.5f, RGB(80, 210, 240));
+        draw_aa_circle(memDC, fillX, trackY, 6.5f, RGB(80, 240, 180), RGB(255, 255, 255), 1.8f);
+
+        SetBkMode(memDC, TRANSPARENT);
+        char valTxt[64];
+        snprintf(valTxt, sizeof(valTxt), "Master: %d%%",
+                 (int)(g_MasterVolWin.local * 100.0f + 0.5f));
+        SetTextColor(memDC, RGB(180, 220, 245));
+        RECT valRc = { 0, 12, w, 34 };
+        DrawTextA(memDC, valTxt, -1, &valRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+        SetTextColor(memDC, RGB(80, 95, 115));
+        TextOutA(memDC, trackLeft, trackY + 12, "0%", 2);
+        TextOutA(memDC, trackRight - 24, trackY + 12, "150%", 4);
+
+        SetTextColor(memDC, RGB(140, 155, 175));
+        RECT hintRc = { 0, h - 26, w, h - 5 };
+        DrawTextA(memDC, "Right-click to reset to 100% | Scroll to fine-tune (5%)", -1,
+                  &hintRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+        BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
+        SelectObject(memDC, oldFontMem);
+        SelectObject(memDC, oldBmp);
+        DeleteObject(memBmp);
+        DeleteDC(memDC);
+        SelectObject(hdc, oldFontMain);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    }
+    return DefWindowProcA(hwnd, msg, wParam, lParam);
+}
+
+static inline void open_master_volume_popup(HWND parentHwnd) {
+    if (!g_MasterVolWin.hwnd) {
+        static bool s_registered = false;
+        if (!s_registered) {
+            WNDCLASSA wc = { 0 };
+            wc.lpfnWndProc   = MasterVolWndProc;
+            wc.hInstance     = GetModuleHandle(NULL);
+            wc.lpszClassName = "RefractMasterVolClass";
+            wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+            RegisterClassA(&wc);
+            s_registered = true;
+        }
+
+        int rw = 420, rh = 150;
+        int scrW = GetSystemMetrics(SM_CXSCREEN), scrH = GetSystemMetrics(SM_CYSCREEN);
+        int rx = (scrW - rw) / 2, ry = (scrH - rh) / 2;
+        if (parentHwnd && IsWindow(parentHwnd)) {
+            RECT prc;
+            GetWindowRect(parentHwnd, &prc);
+            rx = prc.left + ((prc.right - prc.left) - rw) / 2;
+            ry = prc.top + ((prc.bottom - prc.top) - rh) / 2;
+        }
+        if (rx < 0 || rx + rw > scrW) rx = (scrW - rw) / 2;
+        if (ry < 0 || ry + rh > scrH) ry = (scrH - rh) / 2;
+
+        g_MasterVolWin.hwnd = CreateWindowExA(
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+            "RefractMasterVolClass",
+            "Master Volume",
+            WS_POPUPWINDOW | WS_CAPTION | WS_VISIBLE,
+            rx, ry, rw, rh,
+            parentHwnd, NULL, GetModuleHandle(NULL), NULL
+        );
+    }
+
+    // Popup owns its preview value; snapshot the committed volume once at open.
+    seq_lock();
+    g_MasterVolWin.local = g_Seq.masterVolume;
+    seq_unlock();
+    if (g_MasterVolWin.local < MASTER_VOL_RANGE_LO) g_MasterVolWin.local = MASTER_VOL_RANGE_LO;
+    if (g_MasterVolWin.local > MASTER_VOL_RANGE_HI) g_MasterVolWin.local = MASTER_VOL_RANGE_HI;
+    g_MasterVolWin.isDragging = false;
+
+    ShowWindow(g_MasterVolWin.hwnd, SW_SHOW);
+    SetForegroundWindow(g_MasterVolWin.hwnd);
+    InvalidateRect(g_MasterVolWin.hwnd, NULL, FALSE);
 }
