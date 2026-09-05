@@ -16,7 +16,7 @@
 
 ---
 
-### input/output
+### media
 
 | Component | Description |
 | :--- | :--- |
