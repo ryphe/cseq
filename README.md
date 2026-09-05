@@ -55,7 +55,7 @@
 | **Master Bus** | Switchable **limiter** (look‑ahead, 2 ms) or **soft‑clipper** for transparent peak control. Global **Lo‑Fi** degradation (bit depth 8–12, sample rate 8–32 kHz) over the entire mix |
 | **Visualizer** | Real‑time spectrum + oscilloscope overlay (OSC/SPEC/COMBO modes). Adjustable FFT size (256–8192), channel routing (Stereo / L / R / Mid‑Side), zoom, and colour hue. Hover for frequency/note/dB tooltips. Driven by a lock‑free audio ring — zero impact on the real‑time path |
 | **UI & Workflow** | 120 FPS GDI compositor with hash‑based dirty tracking for efficient partial redraws. Content‑addressed PCM disk cache deduplicates imported audio. **Media Explorer** with loopable preview. Full **Undo/Redo** with atomic whole‑struct snapshots. Built‑in **Keybinds** reference window |
-| **Real‑Time Core** | Audio callback is strictly allocation‑free, I/O‑free, and GUI‑free. SIMD‑accelerated track summing (AVX2/SSE2). Denormal‑hardened (FTZ/DAZ) for stable CPU usage. Heavy lifting (decode, save, export, peak‑building, SF2 pre‑render) runs on background workers — playback never stalls |
+| **Real‑Time Core** | Audio callback is strictly allocation‑free, I/O‑free, and GUI‑free. SIMD‑accelerated track summing (AVX2/SSE2). Denormal‑hardened (FTZ/DAZ) for stable CPU usage. Heavy lifting (decode, save, export, peak‑building, SF2 pre‑render) runs on background workers so playback never stalls |
 | **Project & Export** | Versioned trailing sections ensure forward/backward compatibility across builds. Deterministic WAV export (16‑/24‑/32‑bit with TPDF dithering) using the exact same render loop as live playback. Export output is mathematically bit‑for‑bit identical to what you hear in‑session |
 
 ### libraries
