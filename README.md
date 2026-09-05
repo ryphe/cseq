@@ -29,7 +29,7 @@
 
 | Component | Description |
 | :--- | :--- |
-| **Keybinds Reference** | Press `K` or click the `[KEYBINDS]` button in the top toolbar to open a searchable reference window listing every keyboard shortcut — no need to memorise anything |
+| **Keybinds Reference** | Press `K` or click the `[KEYBINDS]` button in the top toolbar to open a searchable reference window listing every keyboard shortcut |
 | **Timeline Canvas** | Click a clip to select it; drag to reposition. Drag left/right edges to **trim** length; hold `Alt` while dragging a clip to **slip‑edit** its internal sample offset (audio content shifts under the clip). Drag the small fade‑in/out handles (top corners) to adjust fade length. Drag a marquee (click empty space and drag) to select multiple clips; `Ctrl+Drag` a selection to **duplicate** clips in place. `Shift+Drag` a sample clip's edge to both adjust playback rate and edge position. Right‑click any clip for context menus (rate, fades, granular, slicing) |
 | **Track Headers** | Click the track number/name area to **mute** the track; `Shift+Drag` vertically to **reorder** tracks. Hover and use the **scroll wheel** to adjust track volume. Right‑click to open dedicated dialogs.* |
 | **Piano Roll** | Click on the note grid to **add** a note; double‑click or right‑click to **delete**. Drag a note left/right to **move** it in time; drag its right edge to **resize** its length. Scroll the mouse wheel while hovering over a note to adjust its **velocity** (0–127). The four ADSR knobs (Attack, Decay, Sustain, Release) shape the amplitude envelope of every sample or soundfont note in the clip |
