@@ -1,6 +1,7 @@
 #pragma once
 #include "globals.h"
 #include "granular.h"
+#include "synth.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -189,6 +190,14 @@ static inline void undo_last_action(void) {
         }
     }
 
+    // Restored QuadrumParams may differ from the current runtime buffers;
+    // re-render the transient buffers for every Quadrum clip so notes sound.
+    for (int i = 0; i < g_Seq.clipCount; ++i) {
+        if (g_Seq.clips[i].clipKind == CLIP_KIND_QUADRUM) {
+            synth_state_init_clip(i);
+        }
+    }
+
      
     UndoSnapshot* r = &g_Seq.redoStack[g_Seq.redoCount++];
     r->clipCount = s->clipCount;
@@ -259,6 +268,14 @@ static inline void redo_last_action(void) {
         }
     }
     free_undo_snapshot(r);
+
+    // Restored QuadrumParams may differ from the current runtime buffers;
+    // re-render the transient buffers for every Quadrum clip so notes sound.
+    for (int i = 0; i < g_Seq.clipCount; ++i) {
+        if (g_Seq.clips[i].clipKind == CLIP_KIND_QUADRUM) {
+            synth_state_init_clip(i);
+        }
+    }
 
      
     g_Seq.isModified = true;

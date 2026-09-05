@@ -168,9 +168,16 @@ static inline void reset_to_init_state(void) {
         }
     }
 
+    // Reset per-track filter plotters to default
+    for (int t = 0; t < MAX_TRACKS; ++t) {
+        track_filter_init_defaults(&g_Seq.trackFilter[t]);
+    }
+
+    g_Seq.rateUndoDebounceTimer = 0;
+
+
     seq_unlock();
 
-     
     cseq_clip_structure_changed();
     mark_all_bars_dirty();
 
@@ -2731,6 +2738,9 @@ static inline void filter_plotter_toggle_enable(HWND hwnd) {
     seq_unlock();
     request_filter_curve_render(hwnd);
     InvalidateRect(hwnd, NULL, FALSE);
+    // Invalidate main timeline so the "flt" badge appears/disappears immediately
+    invalidate_timeline_cache();
+    if (g_hWnd) InvalidateRect(g_hWnd, NULL, FALSE);
 }
 
 static inline void filter_plotter_toggle_band(HWND hwnd, int band) {
@@ -2742,9 +2752,12 @@ static inline void filter_plotter_toggle_band(HWND hwnd, int band) {
     f->typeMask ^= TRACK_FILTER_BIT(band);
     f->typeMask &= TRACK_FILTER_MASK_ALL;
     seq_unlock();
-    track_filter_update(f, (float)SAMPLE_RATE);   // UI-render data, off-lock
+    track_filter_update(f, (float)SAMPLE_RATE);
     request_filter_curve_render(hwnd);
     InvalidateRect(hwnd, NULL, FALSE);
+    // Invalidate main timeline so the "flt" badge appears/disappears immediately
+    invalidate_timeline_cache();
+    if (g_hWnd) InvalidateRect(g_hWnd, NULL, FALSE);
 }
 
 // --- Decoupled supersampled curve rendering (mirrors the EQ panel) ----------
@@ -8399,8 +8412,12 @@ static inline void show_fade_context_menu(HWND hwnd, int clipIdx, bool isFadeIn,
         uint8_t newType = (uint8_t)(cmd - baseId);
         push_undo_state();
         seq_lock();
+        // Always apply to the clicked clip first...
         if (isFadeIn) {
             g_Seq.clips[clipIdx].fadeInType = newType;
+            // ...then to every selected clip so the choice propagates across
+            // the whole multi-selection (the clicked clip is set again if it
+            // is selected, which is harmless).
             for (int i = 0; i < g_Seq.clipCount; ++i) {
                 if (g_Seq.clips[i].isSelected) g_Seq.clips[i].fadeInType = newType;
             }

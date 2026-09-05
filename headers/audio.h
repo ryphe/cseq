@@ -896,7 +896,6 @@ __declspec(noinline) static ma_uint32 render_frames(
     float trackL[MAX_TRACKS], trackR[MAX_TRACKS];
     const ma_uint64 loopTotalFrames = (ma_uint64)((double)ctx->totalBeats * (double)ctx->fpb);
     const int nTracks = (ctx->trackCount < MAX_TRACKS) ? ctx->trackCount : MAX_TRACKS;
-    const fixed32_32_t fpbFixed = float_to_fixed(ctx->fpb);
 
      
     float gLl[MAX_TRACKS], gLr[MAX_TRACKS], gRl[MAX_TRACKS], gRr[MAX_TRACKS];
@@ -974,6 +973,15 @@ __declspec(noinline) static ma_uint32 render_frames(
             if (!s->loaded || !s->pFrames || s->frameCount == 0) continue;
 
             float pRate = (c->playbackRate > 0.01f) ? c->playbackRate : 1.0f;
+
+            // Loop only when the clip length is at least twice the FULL sample
+            // length. The decision is independent of the alt-slip offset so
+            // slipping never flips a clip between looping and not, and a
+            // looping clip always repeats the whole sample from its true start.
+            const double sampleLen = (double)s->frameCount;
+            const bool loop = (sampleLen > 0.0) &&
+                ((double)c->lengthBeats * (double)ctx->fpb * (double)pRate >= sampleLen * 2.0);
+
             float swungStart = apply_clip_swing(c->startBeat, ctx->swing);
             float swungEnd = swungStart + c->lengthBeats;
 
@@ -1004,21 +1012,59 @@ __declspec(noinline) static ma_uint32 render_frames(
             if (linearBeat < swungStart || linearBeat >= swungEnd) continue;
 
             float localBeat = linearBeat - swungStart;
-             
-            fixed32_32_t posF = mulshift_u64(float_to_fixed(localBeat), fpbFixed, 32);
-            posF = mulshift_u64(posF, float_to_fixed(pRate), 32);
-            ma_uint64 pos = (ma_uint64)(posF >> 32) + c->sampleOffsetFrames;
-            ma_uint64 srcFrame = pos % s->frameCount;
-            ma_uint64 srcNext  = (srcFrame + 1) % s->frameCount;
 
-            float frac = (float)(uint32_t)(posF & FIXED_FRAC_MASK) * (1.0f / 4294967296.0f);
-            float l = s->pFrames[srcFrame * 2 + 0]
-                + frac * (s->pFrames[srcNext * 2 + 0] - s->pFrames[srcFrame * 2 + 0]);
-            float r = s->pFrames[srcFrame * 2 + 1]
-                + frac * (s->pFrames[srcNext * 2 + 1] - s->pFrames[srcFrame * 2 + 1]);
+            // Compute the absolute read position (in sample frames) from the
+            // start of the sample. This is the total elapsed frames for the
+            // clip, offset by the sample's playback start.
+            double posTotal = (double)localBeat * (double)ctx->fpb * (double)pRate
+                            + (double)c->sampleOffsetFrames;
+
+            // Past the end of the sample: either loop or fall silent for the
+            // remainder of the clip. When looping, wrap back to the sample's
+            // actual start (frame 0) — the alt-slip offset only sets the entry
+            // point, repeats restart at the very beginning of the sample.
+            if (posTotal >= (double)s->frameCount) {
+                if (loop) {
+                    posTotal = fmod(posTotal, (double)s->frameCount);
+                } else {
+                    // No loop: output silence for this frame and skip.
+                    trackL[c->track] += 0.0f;
+                    trackR[c->track] += 0.0f;
+                    continue;
+                }
+            }
+            if (posTotal < 0.0) posTotal = 0.0;
+
+            ma_uint64 idx = (ma_uint64)posTotal;
+            if (idx >= s->frameCount) idx = s->frameCount - 1;
+            ma_uint64 nextIdx = (idx + 1 < s->frameCount) ? idx + 1 : idx;
+            float frac = (float)(posTotal - (double)idx);
+
+            float l = s->pFrames[idx * 2 + 0]
+                + frac * (s->pFrames[nextIdx * 2 + 0] - s->pFrames[idx * 2 + 0]);
+            float r = s->pFrames[idx * 2 + 1]
+                + frac * (s->pFrames[nextIdx * 2 + 1] - s->pFrames[idx * 2 + 1]);
+
+            // Edge-fade only when NOT looping and near the sample's end, to
+            // avoid clicks. When looping, the wrap itself is the seam.
+            float edgeFade = 1.0f;
+            if (!loop) {
+                double framesLeft = (double)s->frameCount - posTotal;
+                if (framesLeft < 64.0) {
+                    edgeFade = (float)(framesLeft / 64.0);
+                    if (edgeFade < 0.0f) edgeFade = 0.0f;
+                }
+            }
+            l *= edgeFade;
+            r *= edgeFade;
 
              
-            double samplePos = (double)(ma_uint64)(posF >> 32);
+            // samplePos is the monotonic elapsed position within the clip
+            // (0..totalSamples), independent of the alt-slip offset and the
+            // loop wrap. It must NOT be derived from the wrapped read position,
+            // which can fall below the offset and turn the micro-fade into
+            // silence on every repeat pass of a looping alt-slipped clip.
+            double samplePos = (double)localBeat * (double)ctx->fpb * (double)pRate;
             double totalSamples = (double)c->lengthBeats * ctx->fpb * pRate;
             float microFade = 1.0f;
             if (samplePos < (double)FADE_SAMPLES) {

@@ -7,6 +7,8 @@
 #include <math.h>
 #include <stdio.h>
 #include <immintrin.h>
+#include <windows.h>
+#include "config.h"
 
 #define HALO_SR          44100
 #define HALO_MAX_VOICES  8
@@ -21,6 +23,11 @@
 #ifndef HALO_TWO_PI
 #define HALO_TWO_PI      6.28318530717958647692
 #endif
+
+/* Global count of simultaneously active Halo voices across all clips. Bounds
+   worst-case audio-thread CPU load; new notes are dropped when the cap is
+   reached. Defined in main.c, mutated only on the audio thread. */
+extern volatile LONG g_haloActiveVoices;
 
 /* ========================================================================
    Numerical Safety Layer (Denormal Hardening & FTZ/DAZ)
@@ -869,10 +876,15 @@ typedef struct {
     double    sample_rate;
     HaloChorus chorus;
     float     limiter_gain;
+    float     mix_gain;      // Continuous smoothed mix gain (eliminates polyphony step pops)
+    int       tail_frames;   // Chorus drain hangover frames after voices deactivate
 } HaloVoiceManager;
 
 static inline void voice_force_idle(HaloVoice* v) {
-    v->active = 0;
+    if (v->active) {
+        InterlockedDecrement(&g_haloActiveVoices);
+        v->active = 0;
+    }
     v->amp_env.state = ADSR_IDLE;
     v->amp_env.level = 0.0;
     svf_reset(&v->filter);
@@ -890,6 +902,8 @@ static inline void voice_force_idle(HaloVoice* v) {
 static inline void voice_manager_init(HaloVoiceManager* vm, double sr) {
     vm->sample_rate = sr;
     vm->limiter_gain = 0.0f;
+    vm->mix_gain = 1.0f;
+    vm->tail_frames = 0;
     chorus_init(&vm->chorus);
     for (int i = 0; i < HALO_MAX_VOICES; i++) {
         HaloVoice* v = &vm->voices[i];
@@ -943,29 +957,65 @@ static inline int voice_manager_active_count(const HaloVoiceManager* vm) {
 }
 
 static inline HaloVoice* voice_manager_alloc(HaloVoiceManager* vm, int note) {
-    for (int i = 0; i < HALO_MAX_VOICES; i++) {
-        if (vm->voices[i].active && vm->voices[i].note == note) {
-            return &vm->voices[i];
-        }
-    }
+    // 1. Prioritize completely inactive voices so any releasing voice can
+    // ring out smoothly without having its phases reset or its tail cut.
     for (int i = 0; i < HALO_MAX_VOICES; i++) {
         if (!vm->voices[i].active) {
             return &vm->voices[i];
         }
     }
-    int oldest_idx = 0;
-    double max_time = -1.0;
+
+    // 2. If no voices are free, check for an actively sustaining voice on the
+    // same note (legato / retrigger). Do NOT steal if in ADSR_RELEASE.
     for (int i = 0; i < HALO_MAX_VOICES; i++) {
-        if (vm->voices[i].time_active > max_time) {
-            max_time = vm->voices[i].time_active;
-            oldest_idx = i;
+        if (vm->voices[i].active && vm->voices[i].note == note &&
+            vm->voices[i].amp_env.state != ADSR_RELEASE &&
+            vm->voices[i].amp_env.state != ADSR_IDLE) {
+            return &vm->voices[i];
         }
     }
-    voice_force_idle(&vm->voices[oldest_idx]);
-    return &vm->voices[oldest_idx];
+
+    // 3. All voices are active. Prioritize stealing a voice currently in RELEASE,
+    // picking the one closest to silence (lowest amp_env.level).
+    int steal_idx = -1;
+    double min_level = 1e9;
+    for (int i = 0; i < HALO_MAX_VOICES; i++) {
+        if (vm->voices[i].amp_env.state == ADSR_RELEASE ||
+            vm->voices[i].amp_env.state == ADSR_IDLE) {
+            if (vm->voices[i].amp_env.level < min_level) {
+                min_level = vm->voices[i].amp_env.level;
+                steal_idx = i;
+            }
+        }
+    }
+
+    // 4. If all voices are held, steal the oldest voice by time_active.
+    if (steal_idx < 0) {
+        double max_time = -1.0;
+        for (int i = 0; i < HALO_MAX_VOICES; i++) {
+            if (vm->voices[i].time_active > max_time) {
+                max_time = vm->voices[i].time_active;
+                steal_idx = i;
+            }
+        }
+    }
+
+    if (steal_idx >= 0) {
+        voice_force_idle(&vm->voices[steal_idx]);
+        return &vm->voices[steal_idx];
+    }
+
+    return &vm->voices[0];
 }
 
 static inline void voice_note_on(HaloVoice* v, int note, float vel, double sr, const HaloPatch* patch) {
+    if (!v->active) {
+        LONG newCount = InterlockedIncrement(&g_haloActiveVoices);
+        if (newCount > HALO_MAX_GLOBAL_VOICES) {
+            InterlockedDecrement(&g_haloActiveVoices);
+            return; /* voice stays idle; allocation fails (silence) */
+        }
+    }
     v->active = 1;
     v->note = note;
     v->velocity = vel;
@@ -975,18 +1025,24 @@ static inline void voice_note_on(HaloVoice* v, int note, float vel, double sr, c
     v->frequency = note_freq;
 
     v->amp_env.attack = patch->amp_attack;
-    v->amp_env.decay = patch->amp_decay * 0.6;
+    v->amp_env.decay = patch->amp_decay * 0.6f;
     v->amp_env.sustain = patch->amp_sustain;
     v->amp_env.release = patch->amp_release;
+    if (v->amp_env.release < 0.02f) v->amp_env.release = 0.02f; // 20ms minimum
     adsr_recompute_rates(&v->amp_env);
+    v->amp_env.level = 0.0; // Clean attack starting from zero amplitude
     adsr_gate(&v->amp_env, 1);
 
-    v->filter_env.attack = patch->amp_attack * 0.8;
-    v->filter_env.decay = patch->amp_decay * 0.4;
-    v->filter_env.sustain = 0.20;
-    v->filter_env.release = patch->amp_release * 0.5;
+    v->filter_env.attack = patch->amp_attack * 0.8f;
+    v->filter_env.decay = patch->amp_decay * 0.4f;
+    v->filter_env.sustain = 0.20f;
+    v->filter_env.release = patch->amp_release * 0.75f;
+    if (v->filter_env.release < 0.02f) v->filter_env.release = 0.02f; // 20ms minimum
     adsr_recompute_rates(&v->filter_env);
+    v->filter_env.level = 0.0;
     adsr_gate(&v->filter_env, 1);
+
+    svf_reset(&v->filter); // Clear resonant memory from previous notes
 
     v->lfo.frequency = patch->lfo_rate;
     v->additive.count = (int)(patch->partial_count + 0.5);
@@ -1075,11 +1131,13 @@ static inline void voice_render_block(HaloVoice* v, float* out_buf, int frames, 
     v->amp_env.sustain = patch->amp_sustain;
     if (v->amp_env.release != patch->amp_release) {
         v->amp_env.release = patch->amp_release;
+        if (v->amp_env.release < 0.02f) v->amp_env.release = 0.02f; // 20ms minimum
     }
     adsr_recompute_rates(&v->amp_env);
-    v->filter_env.attack = patch->amp_attack * 0.8;
-    v->filter_env.decay = patch->amp_decay * 0.4;
-    v->filter_env.release = patch->amp_release * 0.5;
+    v->filter_env.attack = patch->amp_attack * 0.75f;
+    v->filter_env.decay = patch->amp_decay * 0.4f;
+    v->filter_env.release = patch->amp_release * 0.75f;
+    if (v->filter_env.release < 0.02f) v->filter_env.release = 0.02f; // 20ms minimum
     adsr_recompute_rates(&v->filter_env);
 
     smooth_param_set(&v->smooth_cutoff, patch->filter_cutoff);
@@ -1192,7 +1250,7 @@ static inline void voice_render_block(HaloVoice* v, float* out_buf, int frames, 
         double f_env = adsr_tick(&v->filter_env);
 
         if (v->amp_env.state == ADSR_IDLE) {
-            v->active = 0;
+            voice_force_idle(v);
             for (int rem = i; rem < frames; rem++) {
                 out_buf[2 * rem] = 0.0f;
                 out_buf[2 * rem + 1] = 0.0f;
@@ -1261,31 +1319,51 @@ static inline void halo_process_audio(HaloVoiceManager* vm, const HaloPatch* pat
         }
     }
 
-    float mix_gain = 1.0f / sqrtf((float)(active_voices > 0 ? active_voices : 1));
+    // Keep the chorus wet buffer alive after the last voice releases (~35 ms)
+    if (active_voices > 0) {
+        vm->tail_frames = (int)(0.035 * HALO_SR);
+    } else if (vm->tail_frames > 0) {
+        vm->tail_frames -= frames;
+        if (vm->tail_frames < 0) vm->tail_frames = 0;
+    }
 
     chorus_process(&vm->chorus, out_buf, frames);
 
-    int total = frames * 2;
-    float attack = expf(-1.0f / (0.001f * (float)HALO_SR));
-    float release = expf(-1.0f / (0.120f * (float)HALO_SR));
+    // Target polyphony mix gain smoothed continuously with a 25 ms one-pole filter
+    float target_gain = (active_voices > 0) ? (1.0f / sqrtf((float)active_voices)) : 1.0f;
+    float gain_slew = 1.0f - expf(-1.0f / (0.025f * (float)HALO_SR));
+
+    // True one-pole exponential tracking coefficients for limiter
+    float attack_coef  = 1.0f - expf(-1.0f / (0.001f * (float)HALO_SR)); // 1 ms attack
+    float release_coef = 1.0f - expf(-1.0f / (0.120f * (float)HALO_SR)); // 120 ms release
     float ceiling = 0.95f;
 
-    for (int i = 0; i < total; ++i) {
-        float val = out_buf[i] * mix_gain * 0.8f;
-        float peak = fabsf(val);
+    for (int i = 0; i < frames; ++i) {
+        vm->mix_gain += gain_slew * (target_gain - vm->mix_gain);
 
+        float l = out_buf[i * 2]     * vm->mix_gain * 0.8f;
+        float r = out_buf[i * 2 + 1] * vm->mix_gain * 0.8f;
+
+        // Linked stereo peak detection
+        float peak = fmaxf(fabsf(l), fabsf(r));
         if (peak > vm->limiter_gain) {
-            vm->limiter_gain += attack * (peak - vm->limiter_gain);
+            vm->limiter_gain += attack_coef * (peak - vm->limiter_gain);
         } else {
-            vm->limiter_gain += release * (peak - vm->limiter_gain);
+            vm->limiter_gain += release_coef * (peak - vm->limiter_gain);
         }
 
         float g = (vm->limiter_gain > ceiling) ? (ceiling / vm->limiter_gain) : 1.0f;
-        val *= g;
+        l *= g;
+        r *= g;
 
-        if (val > 0.8f)       val = 0.8f + tanhf((val - 0.8f) / 0.2f) * 0.2f;
-        else if (val < -0.8f) val = -0.8f + tanhf((val + 0.8f) / 0.2f) * 0.2f;
-        out_buf[i] = val;
+        if (l > 0.8f)       l = 0.8f + tanhf((l - 0.8f) / 0.2f) * 0.2f;
+        else if (l < -0.8f) l = -0.8f + tanhf((l + 0.8f) / 0.2f) * 0.2f;
+
+        if (r > 0.8f)       r = 0.8f + tanhf((r - 0.8f) / 0.2f) * 0.2f;
+        else if (r < -0.8f) r = -0.8f + tanhf((r + 0.8f) / 0.2f) * 0.2f;
+
+        out_buf[i * 2]     = l;
+        out_buf[i * 2 + 1] = r;
     }
 
     denormal_guard_leave(&guard);

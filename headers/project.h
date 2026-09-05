@@ -985,14 +985,22 @@ static DWORD WINAPI LoadProjectThreadProc(LPVOID lpParam) {
     set_playback_frame(0);
 
      
+    // Reset per-track mix state (pan/width/solo) these will be overwritten
+    // by the CSQT section if present; otherwise keep defaults.
     for (int t = 0; t < g_Seq.trackCount; ++t) {
         g_Seq.trackPan[t]   = 0.0f;
         g_Seq.trackWidth[t] = 1.0f;
         g_Seq.trackSolo[t]  = false;
+    }
+
+    // Read the legacy CSQTrack records (mute, volume, EQ parameters).
+    for (int t = 0; t < g_Seq.trackCount; ++t) {
         CSQTrack trk;
         if (fread(&trk, sizeof(trk), 1, fp) == 1) {
             g_Seq.trackMuted[t]  = trk.isMuted != 0;
             g_Seq.trackVolume[t] = trk.volume;
+
+            // Restore EQ gains (low, mid, high)
             g_Seq.trackEqLow[t]  = trk.eqLow;
             g_Seq.trackEqMid[t]  = trk.eqMid;
             g_Seq.trackEqHigh[t] = trk.eqHigh;
@@ -1000,12 +1008,24 @@ static DWORD WINAPI LoadProjectThreadProc(LPVOID lpParam) {
             memcpy(g_Seq.trackEqQ[t],    trk.eqQ,    sizeof(float) * 3);
             init_track_theme(t);
 
-            
+            // Apply gains to the SmoothEQ3 (three‑band shelving)
             smooth_eq3_set_params(&g_Seq.trackEQ[t], trk.eqHigh, trk.eqMid, trk.eqLow);
+
+            // **FIX: Restore peak biquads with the loaded frequency and Q, not defaults**
+            float gains[3] = { trk.eqLow, trk.eqMid, trk.eqHigh };
             for (int b = 0; b < 3; ++b) {
+                // Convert normalized freq (0..1) to Hz (matches UI mapping)
+                float freqHz = 20.0f * powf(1000.0f, trk.eqFreq[b]);
+                // Convert normalized Q (0..1) to actual Q (0.35..8.0)
+                float q = 0.35f + trk.eqQ[b] * 4.65f;
+                float gainDb = (gains[b] - 0.5f) * 24.0f;
+
                 peak_biquad_clear(&g_Seq.trackPeak[t][b]);
-                peak_biquad_set(&g_Seq.trackPeak[t][b], 1000.0f, 0.7f, 0.0f, (float)SAMPLE_RATE);
+                peak_biquad_set(&g_Seq.trackPeak[t][b], freqHz, q, gainDb, (float)SAMPLE_RATE);
             }
+
+            // Enable the EQ (so it processes in the audio callback)
+            g_Seq.trackEqActive[t] = true;
         }
     }
     job_set_progress(15);

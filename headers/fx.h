@@ -149,8 +149,8 @@ static void fx_buff_process(FxInstance* fx, float* L, float* R) {
     *L = denormal_flush_f(inL * (1.0f - mix) + wetL * mix);
     *R = denormal_flush_f(inR * (1.0f - mix) + wetR * mix);
 }
-
  
+// --- Delay -------------------------------------------------------------------
 #define FX_DELAY_MAX_MS 2000.0f
 #define FX_DELAY_SMOOTH 0.002f    
 
@@ -162,6 +162,7 @@ typedef struct {
     int    sr;
     float  currentDly;     
     float  lpL, lpR;       
+    float  hpL, hpR;       // High-pass filter state to prevent feedback mud
     float  lastTone;       
     float  alpha;          
 } FxDelayState;
@@ -246,14 +247,14 @@ static void fx_delay_process(FxInstance* fx, float* L, float* R) {
     if (mix < 0.0f) mix = 0.0f;
     if (mix > 1.0f) mix = 1.0f;
 
-     
+    // Smooth delay time
     float targetDly = 0.001f * timeMs * (float)s->sr;
     if (targetDly < 32.0f) targetDly = 32.0f;
     if (targetDly > (float)(s->cap - 4)) targetDly = (float)(s->cap - 4);
     s->currentDly = denormal_flush_f(s->currentDly + FX_DELAY_SMOOTH * (targetDly - s->currentDly));
     if (s->currentDly < 32.0f) s->currentDly = 32.0f;
 
-     
+    // Tone lowpass filter coefficient
     if (fabsf(toneHz - s->lastTone) > 0.5f) {
         s->alpha = 1.0f - expf(-6.2831853f * toneHz / (float)s->sr);
         if (s->alpha < 0.0f) s->alpha = 0.0f;
@@ -261,11 +262,10 @@ static void fx_delay_process(FxInstance* fx, float* L, float* R) {
         s->lastTone = toneHz;
     }
 
-     
     float drive = 1.0f + sat * 2.0f;
-
-     
     float inL = *L, inR = *R;
+
+    // Hermite fractional delay interpolation
     int dlyI = (int)s->currentDly;
     float dlyF = s->currentDly - (float)dlyI;
     int i1  = s->writePos - dlyI;  if (i1  < 0) i1  += s->cap;
@@ -275,25 +275,39 @@ static void fx_delay_process(FxInstance* fx, float* L, float* R) {
     float dl = fx_hermite(s->bufL[im1], s->bufL[i0], s->bufL[i1], s->bufL[i2], 1.0f - dlyF);
     float dr = fx_hermite(s->bufR[im1], s->bufR[i0], s->bufR[i1], s->bufR[i2], 1.0f - dlyF);
 
-     
+    // Tone shaping: 1-pole Low-Pass + 1-pole High-Pass (~60 Hz) in feedback loop
     s->lpL = denormal_flush_f(s->lpL + s->alpha * (dl - s->lpL));
     s->lpR = denormal_flush_f(s->lpR + s->alpha * (dr - s->lpR));
-    float fbL = pingpong ? s->lpR : s->lpL;
-    float fbR = pingpong ? s->lpL : s->lpR;
-    s->bufL[s->writePos] = denormal_flush_f(inL + fx_softclip(fbL * drive) * fb / drive);
-    s->bufR[s->writePos] = denormal_flush_f(inR + fx_softclip(fbR * drive) * fb / drive);
+    s->hpL = denormal_flush_f(s->hpL + 0.008f * (s->lpL - s->hpL));
+    s->hpR = denormal_flush_f(s->hpR + 0.008f * (s->lpR - s->hpR));
+    float fltL = s->lpL - s->hpL;
+    float fltR = s->lpR - s->hpR;
+
+    // Ping-Pong Routing:
+    // If pingpong is active, send mono sum to Left only, and cross feedback.
+    float feedL = pingpong ? (inL + inR) * 0.5f : inL;
+    float feedR = pingpong ? 0.0f               : inR;
+    float fbL   = pingpong ? fltR               : fltL;
+    float fbR   = pingpong ? fltL               : fltR;
+
+    s->bufL[s->writePos] = denormal_flush_f(feedL + fx_softclip(fbL * drive) * fb / drive);
+    s->bufR[s->writePos] = denormal_flush_f(feedR + fx_softclip(fbR * drive) * fb / drive);
     s->writePos++;
     if (s->writePos >= s->cap) s->writePos = 0;
 
-    *L = denormal_flush_f(inL * (1.0f - mix) + dl * mix);
-    *R = denormal_flush_f(inR * (1.0f - mix) + dr * mix);
+    // Equal-power dry/wet crossfade (no mid-dial volume dip)
+    float mixAngle = mix * (0.5f * DSP_PI_F);
+    float dryGain = cosf(mixAngle);
+    float wetGain = sinf(mixAngle);
+
+    *L = denormal_flush_f(inL * dryGain + dl * wetGain);
+    *R = denormal_flush_f(inR * dryGain + dr * wetGain);
 }
 
- 
+// --- Reverb ------------------------------------------------------------------
 #define FX_RV_STEREO_SPREAD 23
 #define FX_RV_PREDELAY_MAX_MS 150.0f
- 
-#define FX_RV_WET_TRIM 0.67f // avoids inter-stage clipping
+#define FX_RV_WET_TRIM 0.80f
 
 static const int kFxRvCombBase[8] = { 1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617 };   
 static const int kFxRvApBase[4]   = { 556, 441, 341, 225 };
@@ -317,6 +331,7 @@ typedef struct {
     int         alen[4];
     float       fbL[8], fbR[8];     
     float       lastDecay;
+    float       hpL, hpR;       // Subsonic rumble filter
 } FxReverbState;
 
 static inline float fx_rv_comb_process(FxRvComb* c, float input, int len, float feedback, float dampK) {
@@ -329,7 +344,7 @@ static inline float fx_rv_comb_process(FxRvComb* c, float input, int len, float 
     return out;
 }
 
- 
+// Canonical 1-buffer Schroeder Allpass: exactly flat |H(w)| == 1.0 across all frequencies
 static inline float fx_rv_allpass_process(FxRvAllpass* a, float input, int len, float modOff) {
     float delay = (float)len + modOff;
     float rPos = (float)a->idx - delay;
@@ -342,8 +357,8 @@ static inline float fx_rv_allpass_process(FxRvAllpass* a, float input, int len, 
     if (i1 >= a->cap) i1 -= a->cap;
 
     float bufout = a->buf[i0] * (1.0f - fr) + a->buf[i1] * fr;
-    float output = -input + bufout;
-    a->buf[a->idx] = denormal_flush_f(input + bufout * 0.5f);
+    float output = -0.5f * input + bufout;
+    a->buf[a->idx] = denormal_flush_f(input + 0.5f * output);
 
     a->idx++;
     if (a->idx >= a->cap) a->idx = 0;
@@ -438,7 +453,7 @@ static void fx_reverb_process(FxInstance* fx, float* L, float* R) {
     float dryL = *L, dryR = *R;
     float inL = dryL, inR = dryR;
 
-     
+    // Predelay interpolation
     {
         float target = 0.001f * preMs * (float)s->sr;
         if (target > (float)(s->preCap - 2)) target = (float)(s->preCap - 2);
@@ -460,7 +475,7 @@ static void fx_reverb_process(FxInstance* fx, float* L, float* R) {
         inR = denormal_flush_f(pr);
     }
 
-     
+    // Decay feedback coefficients
     if (fabsf(decay - s->lastDecay) > 0.005f) {
         for (int i = 0; i < 8; ++i) {
             float tL = (float)s->clenL[i] / (float)s->sr;
@@ -471,52 +486,65 @@ static void fx_reverb_process(FxInstance* fx, float* L, float* R) {
         s->lastDecay = decay;
     }
 
-     
+    // Acoustic spatial cross-feed into parallel comb filters
+    float inCombL = (inL * 0.75f + inR * 0.25f) * 0.2f;
+    float inCombR = (inR * 0.75f + inL * 0.25f) * 0.2f;
     float sumL = 0.0f, sumR = 0.0f;
     for (int i = 0; i < 8; ++i) {
-        sumL += fx_rv_comb_process(&s->combL[i], inL * 0.2f, s->clenL[i], s->fbL[i], dampK);
-        sumR += fx_rv_comb_process(&s->combR[i], inR * 0.2f, s->clenR[i], s->fbR[i], dampK);
+        sumL += fx_rv_comb_process(&s->combL[i], inCombL, s->clenL[i], s->fbL[i], dampK);
+        sumR += fx_rv_comb_process(&s->combR[i], inCombR, s->clenR[i], s->fbR[i], dampK);
     }
     sumL = denormal_flush_f(sumL * 0.5f);
     sumR = denormal_flush_f(sumR * 0.5f);
 
-     
+    // Advance LFOs
     s->lfoPhase1 = denormal_flush_f(s->lfoPhase1 + 0.6f  / (float)s->sr);
     if (s->lfoPhase1 >= 1.0f) s->lfoPhase1 -= 1.0f;
     s->lfoPhase2 = denormal_flush_f(s->lfoPhase2 + 0.85f / (float)s->sr);
     if (s->lfoPhase2 >= 1.0f) s->lfoPhase2 -= 1.0f;
+    
+    // Stereo quadrature modulation: Left uses sin(), Right uses cos()
     float depth = mod * 3.0f * s->srRatio;
-    float off1 = depth * (0.5f + 0.5f * sinf(6.2831853f * s->lfoPhase1));
-    float off2 = depth * (0.5f + 0.5f * sinf(6.2831853f * s->lfoPhase2 + 1.6f));
+    float off1L = depth * (0.5f + 0.5f * sinf(DSP_TWO_PI_F * s->lfoPhase1));
+    float off2L = depth * (0.5f + 0.5f * sinf(DSP_TWO_PI_F * s->lfoPhase2 + 1.6f));
+    float off1R = depth * (0.5f + 0.5f * cosf(DSP_TWO_PI_F * s->lfoPhase1));
+    float off2R = depth * (0.5f + 0.5f * cosf(DSP_TWO_PI_F * s->lfoPhase2 + 1.6f));
 
+    // Allpass diffusion cascade:
+    // Detuning Right channel delay lengths decorrelates the stereo field
     sumL = fx_rv_allpass_process(&s->apL[0], sumL, s->alen[0], 0.0f);
     sumL = fx_rv_allpass_process(&s->apL[1], sumL, s->alen[1], 0.0f);
-    sumL = fx_rv_allpass_process(&s->apL[2], sumL, s->alen[2], off1);
-    sumL = fx_rv_allpass_process(&s->apL[3], sumL, s->alen[3], off2);
-    sumR = fx_rv_allpass_process(&s->apR[0], sumR, s->alen[0], 0.0f);
-    sumR = fx_rv_allpass_process(&s->apR[1], sumR, s->alen[1], 0.0f);
-    sumR = fx_rv_allpass_process(&s->apR[2], sumR, s->alen[2], off1);
-    sumR = fx_rv_allpass_process(&s->apR[3], sumR, s->alen[3], off2);
+    sumL = fx_rv_allpass_process(&s->apL[2], sumL, s->alen[2], off1L);
+    sumL = fx_rv_allpass_process(&s->apL[3], sumL, s->alen[3], off2L);
 
-     
+    sumR = fx_rv_allpass_process(&s->apR[0], sumR, s->alen[0] + 19, 0.0f);
+    sumR = fx_rv_allpass_process(&s->apR[1], sumR, s->alen[1] - 13, 0.0f);
+    sumR = fx_rv_allpass_process(&s->apR[2], sumR, s->alen[2] + 23, off1R);
+    sumR = fx_rv_allpass_process(&s->apR[3], sumR, s->alen[3] - 17, off2R);
+
+    // High-pass filter (~60 Hz) on wet output to avoid subsonic rumble accumulation
+    s->hpL = denormal_flush_f(s->hpL + 0.008f * (sumL - s->hpL));
+    s->hpR = denormal_flush_f(s->hpR + 0.008f * (sumR - s->hpR));
+    sumL -= s->hpL;
+    sumR -= s->hpR;
+
+    // Stereo Width M/S Matrix
     float mid  = 0.5f * (sumL + sumR);
     float side = 0.5f * (sumL - sumR);
     sumL = mid + width * side;
     sumR = mid - width * side;
 
-     
     sumL *= FX_RV_WET_TRIM;
     sumR *= FX_RV_WET_TRIM;
 
-     
-    float th = mix * 3.14159265358979323846f * 0.5f;
+    // Equal-power dry/wet crossfade
+    float th = mix * (0.5f * DSP_PI_F);
     float cd = cosf(th);
     float sw = sinf(th);
 
     *L = denormal_flush_f(dryL * cd + sumL * sw);
     *R = denormal_flush_f(dryR * cd + sumR * sw);
 }
-
  
 typedef struct {
     float phase;

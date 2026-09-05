@@ -850,6 +850,7 @@ static inline void wave_compute_spans(int w, int h,
                                       const AudioSample* s,
                                       double frameAtX0, double framesPerPx,
                                       float volume, float maxAmpPx,
+                                      double playableLen, bool loopWaveform,
                                       float clipLengthBeats,
                                       float fadeInBeats, float fadeOutBeats,
                                       uint8_t fadeInType, uint8_t fadeOutType,
@@ -874,14 +875,23 @@ static inline void wave_compute_spans(int w, int h,
     const float invIn   = hasIn ? 1.0f / inApexX : 0.0f;
     const float invOut  = hasOut ? 1.0f / (clipRightX - outApexX) : 0.0f;
 
+    // Mirror the audio renderer's loop policy so the waveform shows the same
+    // behavior that is heard: loop only when the clip length is at least twice
+    // the playable sample length; otherwise the region past the sample's end
+    // is silence, not a repeat.
+    const bool   loop = loopWaveform && (playableLen > 0.0);
+
     int gT = h, gB = 0;
 
     // --- Peak source selection (multi-resolution) ---------------------------
     // Deep zoom: sample PCM directly per pixel (Audacity-style true min/max).
     // Overview: pick the highest LOD level whose bin span fits under a pixel.
     // Fallback (no cache built, e.g. granular own-samples): flat line.
+    // When the waveform loops we always read PCM directly so the repeat is
+    // drawn accurately; the peak cache cannot wrap the playable region.
     const bool  deepZoom = s->pFrames && s->frameCount > 0 &&
                            framesPerPx > 0.0 && framesPerPx <= 4096.0;
+    const bool  readPcm = deepZoom || loop;
     const Peak* pk = NULL;
     int   levelEntries = 0;
     double levelBinFrames = 0.0;
@@ -889,7 +899,7 @@ static inline void wave_compute_spans(int w, int h,
     double binPos = 0.0;
     bool havePeaks = (s->peaks && s->peakTotal > 0 && s->lodCount > 0 && invCount > 0.0);
 
-    if (!deepZoom && havePeaks) {
+    if (!readPcm && havePeaks) {
         // Choose the finest level whose bin is <= one pixel wide; fall back
         // to the coarsest level when zoomed far out beyond level 0.
         int chosen = s->lodCount - 1;
@@ -928,23 +938,47 @@ static inline void wave_compute_spans(int w, int h,
         const float frac = 1.0f;
 
         float vMin = 0.0f, vMax = 0.0f;
-        if (deepZoom) {
-            // True sample-accurate min/max under this pixel column.
-            ma_uint64 i0 = (f0 > 0.0) ? (ma_uint64)f0 : 0;
-            ma_uint64 i1 = (ma_uint64)f1;
-            if (i1 > s->frameCount) i1 = s->frameCount;
-            if (i1 <= i0) i1 = (i0 < s->frameCount) ? i0 + 1 : i0;
+        if (readPcm) {
+            // True sample-accurate min/max under this pixel column. When the
+            // waveform loops, wrap the interval back into the playable region
+            // so the repeat is shown; otherwise clamp to the sample's end
+            // (the region beyond it is silence).
             vMin = 0.0f; vMax = 0.0f;
-            for (ma_uint64 f = i0; f < i1; ++f) {
-                float mono = (s->pFrames[f * 2 + 0] + s->pFrames[f * 2 + 1]) * 0.5f;
-                if (mono < vMin) vMin = mono;
-                if (mono > vMax) vMax = mono;
+            const ma_uint64 frameCount = s->frameCount;
+            ma_uint64 fi = (f0 > 0.0) ? (ma_uint64)f0 : 0;
+            ma_uint64 fe = (ma_uint64)f1;
+            if (fe <= fi) fe = fi + 1;
+            if (loop) {
+                // Iterate across the pixel's interval, wrapping each frame back
+                // to the sample's actual start (frame 0) so the repeat shows
+                // the full 100% sample, matching the audio renderer. The
+                // alt-slip offset only sets the entry point, not the repeats.
+                for (ma_uint64 f = fi; f < fe; ++f) {
+                    ma_uint64 idx = f % frameCount;
+                    float mono = (s->pFrames[idx * 2 + 0] + s->pFrames[idx * 2 + 1]) * 0.5f;
+                    if (mono < vMin) vMin = mono;
+                    if (mono > vMax) vMax = mono;
+                }
+            } else {
+                if (fi > frameCount) fi = frameCount;
+                if (fe > frameCount) fe = frameCount;
+                if (fe <= fi) fe = (fi < frameCount) ? fi + 1 : fi;
+                for (ma_uint64 f = fi; f < fe; ++f) {
+                    float mono = (s->pFrames[f * 2 + 0] + s->pFrames[f * 2 + 1]) * 0.5f;
+                    if (mono < vMin) vMin = mono;
+                    if (mono > vMax) vMax = mono;
+                }
             }
             vMin *= volume;
             vMax *= volume;
         } else if (pk) {
             const ma_uint64 entryFrames = (ma_uint64)(levelBinFrames + 0.5);
-            if (binsPerPx >= 1.0f) {
+            // When the clip does not loop, columns beyond the sample's end are
+            // silence (flat center line), matching what the audio renderer
+            // outputs for that region.
+            if (!loop && f0 >= (double)s->frameCount) {
+                vMin = 0.0f; vMax = 0.0f;
+            } else if (binsPerPx >= 1.0f) {
                  
                 double bp = binPos - floor(binPos / (double)levelEntries) * (double)levelEntries;
                 int i0 = (int)floorf((float)bp);
@@ -1052,6 +1086,7 @@ static inline void draw_smooth_waveform(HDC hdc, int dstX, int dstY, int w, int 
                                         float volume,
                                         COLORREF color,
                                         float maxAmpPx,
+                                        double playableLen, bool loopWaveform,
                                         float clipLengthBeats,
                                         float fadeInBeats, float fadeOutBeats,
                                         uint8_t fadeInType, uint8_t fadeOutType,
@@ -1062,6 +1097,7 @@ static inline void draw_smooth_waveform(HDC hdc, int dstX, int dstY, int w, int 
     wave_build_grad_lut(h);
     int rT, rB;
     wave_compute_spans(w, h, s, frameAtX0, framesPerPx, volume, maxAmpPx,
+                       playableLen, loopWaveform,
                        clipLengthBeats, fadeInBeats, fadeOutBeats,
                        fadeInType, fadeOutType, ppb, startXRel, &rT, &rB);
     if (rB <= rT) return;
@@ -1101,6 +1137,7 @@ typedef struct {
     float    fadeInBeats, fadeOutBeats;
     uint8_t  fadeInType, fadeOutType;
     bool     isMuted, isSelected;
+    bool     loopWaveform;
 } WaveCacheEntry;
 
 static WaveCacheEntry g_waveCache[WAVE_CACHE_MAX_SLOTS];
@@ -1114,7 +1151,8 @@ static inline DWORD wave_cache_make_hash(int sampleIndex, COLORREF waveColor,
                                          float maxAmpPx, float volume,
                                          float fadeInBeats, float fadeOutBeats,
                                          uint8_t fadeInType, uint8_t fadeOutType,
-                                         bool isMuted, bool isSelected) {
+                                         bool isMuted, bool isSelected,
+                                         bool loopWaveform) {
     DWORD d[2];
     DWORD hsh = 2166136261u;
     hsh = hash_dword(hsh, (DWORD)sampleIndex);
@@ -1131,6 +1169,7 @@ static inline DWORD wave_cache_make_hash(int sampleIndex, COLORREF waveColor,
     hsh = hash_dword(hsh, (DWORD)fadeOutType);
     hsh = hash_dword(hsh, isMuted ? 1 : 0);
     hsh = hash_dword(hsh, isSelected ? 1 : 0);
+    hsh = hash_dword(hsh, loopWaveform ? 1 : 0);
     return hsh;
 }
 
@@ -1164,12 +1203,13 @@ static inline WaveCacheEntry* wave_cache_acquire(HDC hdc, bool* outHit,
                                                  float volume, float maxAmpPx,
                                                  float fadeInBeats, float fadeOutBeats,
                                                  uint8_t fadeInType, uint8_t fadeOutType,
-                                                 bool isMuted, bool isSelected) {
+                                                 bool isMuted, bool isSelected,
+                                                 bool loopWaveform) {
     *outHit = false;
     const DWORD hsh = wave_cache_make_hash(sampleIndex, waveColor, w, h,
                                            frameAtX0, framesPerPx, maxAmpPx, volume,
                                            fadeInBeats, fadeOutBeats, fadeInType, fadeOutType,
-                                           isMuted, isSelected);
+                                           isMuted, isSelected, loopWaveform);
     const DWORD now = ++g_waveCacheClock;
 
     WaveCacheEntry* freeSlot = NULL;
@@ -1187,6 +1227,7 @@ static inline WaveCacheEntry* wave_cache_acquire(HDC hdc, bool* outHit,
             e->fadeInBeats == fadeInBeats && e->fadeOutBeats == fadeOutBeats &&
             e->fadeInType == fadeInType && e->fadeOutType == fadeOutType &&
             e->isMuted == isMuted && e->isSelected == isSelected &&
+            e->loopWaveform == loopWaveform &&
             e->frameAtX0 == frameAtX0 && e->framesPerPx == framesPerPx &&
             e->maxAmpPx == maxAmpPx) {
             e->lastUse = now;
@@ -1261,6 +1302,7 @@ static inline WaveCacheEntry* wave_cache_acquire(HDC hdc, bool* outHit,
     freeSlot->fadeOutType = fadeOutType;
     freeSlot->isMuted = isMuted;
     freeSlot->isSelected = isSelected;
+    freeSlot->loopWaveform = loopWaveform;
     return freeSlot;
 }
 
@@ -2109,6 +2151,15 @@ static inline void draw_waveform_clip(HDC hdc, const Clip *clip, const RECT *rec
                 double framesPerPx = (double)fpb * (double)pRate / (double)ppb;
                 int waveW = endX - startX;
 
+                // Loop policy mirrors the audio renderer: loop only when the
+                // clip length is at least twice the FULL sample length. The
+                // decision is independent of the alt-slip offset so slipping
+                // never flips the loop state and the waveform stays stable.
+                double playableLen = (double)s->frameCount - (double)clip->sampleOffsetFrames;
+                double clipLenFrames = (double)clip->lengthBeats * (double)fpb * (double)pRate;
+                bool loopWaveform = ((double)s->frameCount > 0.0) &&
+                                    (clipLenFrames >= (double)s->frameCount * 2.0);
+
                 bool canCache = (!g_waveWinOn && startX == rect->left && endX == rect->right);
                 bool waveAudible = (framesPerPx > 0.0);
                 bool cacheHit = false;
@@ -2120,7 +2171,7 @@ static inline void draw_waveform_clip(HDC hdc, const Clip *clip, const RECT *rec
                                             clip->volume, (float)maxAmpPx,
                                             clip->fadeInBeats, clip->fadeOutBeats,
                                             clip->fadeInType, clip->fadeOutType,
-                                            isMuted, clip->isSelected);
+                                            isMuted, clip->isSelected, loopWaveform);
                 }
 
                 BLENDFUNCTION waveBf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
@@ -2132,6 +2183,7 @@ static inline void draw_waveform_clip(HDC hdc, const Clip *clip, const RECT *rec
                         int rT, rB;
                         wave_compute_spans(waveW, waveH, s, frameAtX0, framesPerPx,
                                            clip->volume, (float)maxAmpPx,
+                                           playableLen, loopWaveform,
                                            clip->lengthBeats,
                                            clip->fadeInBeats, clip->fadeOutBeats,
                                            clip->fadeInType, clip->fadeOutType,
@@ -2148,6 +2200,7 @@ static inline void draw_waveform_clip(HDC hdc, const Clip *clip, const RECT *rec
                                          clip->volume,
                                          waveColor,
                                          (float)maxAmpPx,
+                                         playableLen, loopWaveform,
                                          clip->lengthBeats,
                                          clip->fadeInBeats, clip->fadeOutBeats,
                                          clip->fadeInType, clip->fadeOutType,
@@ -2155,19 +2208,19 @@ static inline void draw_waveform_clip(HDC hdc, const Clip *clip, const RECT *rec
                 }
 
                  
-                if (clip->sampleOffsetFrames != 0) {
-                    double clipLenFrames = (double)clip->lengthBeats * (double)fpb * (double)pRate;
-                    if (clipLenFrames > (double)s->frameCount) {
-                        double fc = (double)s->frameCount;
-                        double k0 = ceil(frameAtX0 / fc);
-                        double loopFrame = k0 * fc;
-                        double dx = (loopFrame - frameAtX0) / framesPerPx;
-                        int loopX = startX + (int)(dx + 0.5);
-                        if (loopX >= startX && loopX <= endX) {
-                            int yBottom = rect->bottom - scale_y(1);
-                            int yTop = rect->bottom - scale_y(12);
-                            draw_aa_line(hdc, loopX, yTop, loopX, yBottom, RGB(255, 255, 255), 0.35f);
-                        }
+                // Loop marker: show where the sample ends and looping (or
+                // silence) begins, whenever the clip is longer than the
+                // playable sample — not only when the clip was alt-slipped.
+                if (clipLenFrames > playableLen) {
+                    double fc = (double)s->frameCount;
+                    double k0 = ceil(frameAtX0 / fc);
+                    double loopFrame = k0 * fc;
+                    double dx = (loopFrame - frameAtX0) / framesPerPx;
+                    int loopX = startX + (int)(dx + 0.5);
+                    if (loopX >= startX && loopX <= endX) {
+                        int yBottom = rect->bottom - scale_y(1);
+                        int yTop = rect->bottom - scale_y(12);
+                        draw_aa_line(hdc, loopX, yTop, loopX, yBottom, RGB(255, 255, 255), 0.35f);
                     }
                 }
             }
@@ -2486,6 +2539,7 @@ static inline DWORD compute_timeline_param_hash(void) {
         hsh = hash_dword(hsh, g_Seq.trackSolo[t] ? 1 : 0);
         hsh = hash_float(hsh, g_Seq.trackVolume[t]);
         hsh = hash_dword(hsh, granular_is_track_enabled(t) ? 1 : 0);
+        hsh = hash_dword(hsh, (g_Seq.trackFilter[t].enabled && g_Seq.trackFilter[t].typeMask != 0) ? 1 : 0);
     }
     seq_unlock();
     return hsh;
@@ -2509,9 +2563,6 @@ static inline DWORD compute_timeline_content_hash(void) {
     seq_unlock();
     return hsh;
 }
-
- 
-
  
 static inline bool is_timeline_dirty(int w, int h) {
     static int s_lastW = 0, s_lastH = 0;
@@ -2711,7 +2762,6 @@ static inline bool viewport_has_invalid_bars(int w) {
     return false;
 }
 
- 
 
 static inline void update_timeline_cache(HDC hdc, int w, int h, const RECT *win) {
 #ifdef CSEQ_PROFILE
@@ -2931,14 +2981,16 @@ static inline void update_timeline_cache(HDC hdc, int w, int h, const RECT *win)
 
         RECT nameRect = { scale_x(10), trackY + scale_y(5), get_track_header_width() - scale_x(6), trackY + scale_y(23) };
         DrawTextA(g_cacheDC, trackName, -1, &nameRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-         
+        
+        // fx indicator
         if (g_TrackFx[t].count > 0) {
             RECT fxRect = { get_track_header_width() - scale_x(34), trackY + scale_y(5),
                             get_track_header_width() - scale_x(6), trackY + scale_y(23) };
             SetTextColor(g_cacheDC, RGB(80, 210, 240));
             DrawTextA(g_cacheDC, "FX", -1, &fxRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         }
+
+        // filter indicator
 
         int curBadgeY = trackY + scale_y(26);
         int badgeH = scale_y(13);
@@ -2974,6 +3026,16 @@ static inline void update_timeline_cache(HDC hdc, int w, int h, const RECT *win)
             SetTextColor(g_cacheDC, RGB(95, 105, 120));
             RECT volRect = { scale_x(10), trackY + scale_y(28), get_track_header_width() - scale_x(10), trackY + scale_y(46) };
             DrawTextA(g_cacheDC, volBuf, -1, &volRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
+
+        // filter indicator: white "flt" label docked at bottom-right of track header
+        if (g_Seq.trackFilter[t].enabled && g_Seq.trackFilter[t].typeMask != 0) {
+            RECT fltRect = { get_track_header_width() - scale_x(34),
+                             trackY + get_track_height() - scale_y(24),
+                             get_track_header_width() - scale_x(6),
+                             trackY + get_track_height() - scale_y(4) };
+            SetTextColor(g_cacheDC, isDim ? RGB(160, 160, 160) : RGB(255, 255, 255));
+            DrawTextA(g_cacheDC, "flt", -1, &fltRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         }
 
         MoveToEx(g_cacheDC, 0, trackY + get_track_height(), NULL);

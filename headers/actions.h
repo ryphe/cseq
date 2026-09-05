@@ -1700,6 +1700,7 @@ static inline void add_track_action(HWND hwnd) {
         g_Seq.trackTriggerProb[newIdx] = 1.0f;
         g_Seq.trackRngState[newIdx] = (uint32_t)(newIdx * 1337) + 1;
 
+        track_filter_init_defaults(&g_Seq.trackFilter[newIdx]);
          
         memset(&g_TrackGran[newIdx], 0, sizeof(GranularEngine));
         g_TrackGran[newIdx].trackIdx = newIdx;

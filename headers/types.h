@@ -612,6 +612,7 @@ typedef struct {
     bool exportMsgActive;
     ULONGLONG exportMsgExpiry;    
 
+    ULONGLONG rateUndoDebounceTimer;  // 0 = no pending undo, >0 = expiry time in ms
      
     volatile LONG isBusy;           
     volatile LONG jobProgress;      

@@ -138,10 +138,18 @@ static inline void synth_state_init_clip(int clipIdx) {
                 q->renderBuf[v] = (float*)malloc((size_t)QUADRUM_MAX_SAMPLES * sizeof(float));
                 if (!q->renderBuf[v]) { q->len[v] = 0; continue; }
             }
-            // Pre-render this voice off the audio thread.
-            q->len[v] = quadrum_render(&c->quadrumParams[v], q->buf[v], QUADRUM_MAX_SAMPLES);
-            q->cached[v] = (q->len[v] > 0);
+            // Render into the staging buffer (the audio thread never reads
+            // renderBuf), then swap the freshly-rendered buffer in under a brief
+            // seq lock so a running device never sees a half-written buffer.
+            int n = quadrum_render(&c->quadrumParams[v], q->renderBuf[v], QUADRUM_MAX_SAMPLES);
+            seq_lock();
+            float* tmp = q->buf[v];
+            q->buf[v] = q->renderBuf[v];
+            q->renderBuf[v] = tmp;
+            q->len[v] = n;
+            q->cached[v] = (n > 0);
             q->patchSig[v] = synth_quadrum_patch_sig(&c->quadrumParams[v]);
+            seq_unlock();
         }
     }
 }
@@ -319,6 +327,20 @@ static inline void synth_snapshot_free(SynthHaloState* halo, SynthQuadrumState* 
     }
 }
 
+// Recompute the global Halo active-voice count from live clip state. Called
+// after bulk teardown paths (project reset/load, clip delete) that zero voice
+// state via memset instead of voice_force_idle, so the counter can't drift.
+static inline void halo_recount_active_voices(void) {
+    LONG n = 0;
+    for (int i = 0; i < MAX_CLIPS; ++i) {
+        const SynthHaloState* h = &g_ClipHalo[i];
+        if (!h->initialized) continue;
+        for (int v = 0; v < HALO_MAX_VOICES; ++v)
+            if (h->vm.voices[v].active) ++n;
+    }
+    InterlockedExchange(&g_haloActiveVoices, n);
+}
+
 // Reset all per-clip synth state (project new/clear). Caller holds no locks.
 static inline void synth_state_reset_all(void) {
     for (int i = 0; i < MAX_CLIPS; ++i) {
@@ -326,6 +348,7 @@ static inline void synth_state_reset_all(void) {
         memset(&g_ClipHalo[i], 0, sizeof(SynthHaloState));
         memset(&g_ClipQuadrum[i], 0, sizeof(SynthQuadrumState));
     }
+    halo_recount_active_voices();
 }
 
 // Shift synth state left by one slot at `del` when a clip is removed and the
@@ -342,6 +365,7 @@ static inline void synth_state_shift_left(int del, int clipCount) {
     synth_state_free_clip(clipCount - 1);
     memset(&g_ClipHalo[clipCount - 1], 0, sizeof(SynthHaloState));
     memset(&g_ClipQuadrum[clipCount - 1], 0, sizeof(SynthQuadrumState));
+    halo_recount_active_voices();
 }
 
 // Forward declarations (definitions below the dispatcher).
@@ -404,13 +428,12 @@ static inline void synth_clip_process_frames_halo(const Clip* c, SynthHaloState*
     float swungStart = apply_clip_swing(c->startBeat, swing);
     float localBeat = startLinearBeat - swungStart;
 
-    // Detect a playhead discontinuity (loop wrap / scrub): if localBeat jumped
-    // backward or skipped far ahead, force-idle every voice and clear all note
-    // state so a sustaining voice can't get stuck across the boundary.
+    // Detect a playhead discontinuity (loop wrap / scrub): release voices smoothly
+    // instead of force-idling to prevent clicks.
     if (st->initialized && localBeat >= 0.0f &&
         st->lastLocalBeat > 0.0f && localBeat < st->lastLocalBeat - 0.001f) {
         for (int v = 0; v < HALO_MAX_VOICES; ++v) {
-            voice_force_idle(&st->vm.voices[v]);
+            voice_note_off(&st->vm.voices[v]);
         }
         memset(st->noteActive, 0, sizeof(st->noteActive));
         memset(st->noteVoice, 0, sizeof(st->noteVoice));
@@ -460,12 +483,13 @@ static inline void synth_clip_process_frames_halo(const Clip* c, SynthHaloState*
         }
     }
 
-    // Render this frame. Keep rendering past the clip end as long as any voice
-    // is still ringing into its release tail (like Quadrum's one-shot decay),
-    // so a note ending at the clip boundary isn't chopped to 0 in one sample.
-    bool anyVoiceActive = false;
-    for (int v = 0; v < HALO_MAX_VOICES; ++v) {
-        if (st->vm.voices[v].active) { anyVoiceActive = true; break; }
+    // Render this frame. Keep rendering as long as any voice is active OR
+    // the chorus delay line is draining (tail_frames > 0).
+    bool anyVoiceActive = (st->vm.tail_frames > 0);
+    if (!anyVoiceActive) {
+        for (int v = 0; v < HALO_MAX_VOICES; ++v) {
+            if (st->vm.voices[v].active) { anyVoiceActive = true; break; }
+        }
     }
     if (localBeat >= 0.0f && (localBeat < c->lengthBeats || anyVoiceActive)) {
         float tmp[2] = { 0.0f, 0.0f };
@@ -549,6 +573,7 @@ static inline bool synth_editor_has_ringing(int clipIdx) {
     if (c->clipKind == CLIP_KIND_HALO) {
         const SynthHaloState* st = &g_ClipHalo[clipIdx];
         if (!st->initialized) return false;
+        if (st->vm.tail_frames > 0) return true; // Keep callback alive while chorus drains
         for (int v = 0; v < HALO_MAX_VOICES; ++v) {
             if (st->vm.voices[v].active) return true;
         }

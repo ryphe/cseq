@@ -479,7 +479,16 @@ static inline LRESULT cseq_main_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 
     case WM_TIMER:
         if (wParam == 1) {
-             
+
+            // Check if we need to push an undo state for rate changes
+            if (g_Seq.rateUndoDebounceTimer != 0 &&
+                GetTickCount64() >= g_Seq.rateUndoDebounceTimer) {
+                g_Seq.rateUndoDebounceTimer = 0;
+                push_undo_state();
+                g_Seq.isModified = true;
+                update_window_title();
+            }
+
             if (g_pendingCsqPath[0] && !g_Seq.isBusy) {
                 char path[MAX_PATH];
                 strncpy(path, g_pendingCsqPath, MAX_PATH - 1);
@@ -637,6 +646,9 @@ static inline LRESULT cseq_main_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                         if (g_Seq.clips[clipIdx].playbackRate > 2.00f) g_Seq.clips[clipIdx].playbackRate = 2.00f;
                         mark_clip_bars_dirty(&g_Seq.clips[clipIdx]);
                     }
+                    // Only rate changes (Shift+Wheel) get their own debounced
+                    // undo step; volume adjustments do not.
+                    g_Seq.rateUndoDebounceTimer = GetTickCount64() + 300;
                 } else if (g_Seq.clips[clipIdx].isSelected) {
                     for (int i = 0; i < g_Seq.clipCount; ++i) {
                         if (g_Seq.clips[i].isSelected) {
@@ -644,7 +656,7 @@ static inline LRESULT cseq_main_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                             if (g_Seq.clips[i].volume < 0.0f) g_Seq.clips[i].volume = 0.0f;
                             if (g_Seq.clips[i].volume > 2.0f) g_Seq.clips[i].volume = 2.0f;
                             mark_clip_bars_dirty(&g_Seq.clips[i]);
-                        }
+                        }    
                     }
                     g_Seq.volumePopupClip = clipIdx;
                     g_Seq.volumePopupExpiry = GetTickCount64() + 1200;
@@ -1046,6 +1058,14 @@ static inline LRESULT cseq_main_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                         return 0;
                     }
                     Clip* c = &g_Seq.clips[clipIdx];
+
+                    // --- Flush any pending rate-change undo before starting a new action ---
+                    if (g_Seq.rateUndoDebounceTimer != 0) {
+                        g_Seq.rateUndoDebounceTimer = 0;
+                        push_undo_state();          // this sets g_Seq.isModified = true
+                        update_window_title();
+                    }
+
                     // Remember the clip's track as the last-clicked track.
                     if (c->track >= 0 && c->track < g_Seq.trackCount)
                         g_Seq.lastClickedTrack = c->track;
@@ -1185,10 +1205,12 @@ static inline LRESULT cseq_main_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 
                     if (canSlip) {
                          
-                        if (!shiftHeld && !ctrlHeld) {
-                            deselect_all_clips();
-                        }
-                        c->isSelected = true;
+                        // The selection logic above already collapsed to a
+                        // single clip when the clicked clip was unselected, and
+                        // preserved any existing multi-selection when the
+                        // clicked clip was already selected. Do NOT deselect
+                        // here, or alt-slipping would silently drop all the
+                        // other selected clips and only slip the clicked one.
                         g_Seq.isSlipDragging = true;
                         g_Seq.isDraggingClip = false;
                         g_Seq.isVolumeDragging = false;
@@ -1289,17 +1311,10 @@ static inline LRESULT cseq_main_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             int clipIdx = get_clip_under_mouse(mx, my);
             bool ctrlOrShift = (GetKeyState(VK_CONTROL) & 0x8000) || (GetKeyState(VK_SHIFT) & 0x8000);
 
-            
-            if (clipIdx != -1) {
-                seq_lock();
-                if (!g_Seq.clips[clipIdx].isSelected && !ctrlOrShift) {
-                    for (int i = 0; i < g_Seq.clipCount; ++i) g_Seq.clips[i].isSelected = false;
-                    g_Seq.clips[clipIdx].isSelected = true;
-                }
-                seq_unlock();
-            }
-
-             
+            // Fade-handle hit test comes FIRST so that right-clicking a fade
+            // handle never alters the current selection. Preserving the
+            // multi-selection is what lets the fade context menu apply the new
+            // curve type to all selected clips.
             if (clipIdx != -1) {
                 float ppb = get_pixels_per_beat();
                 seq_lock();
@@ -1316,6 +1331,16 @@ static inline LRESULT cseq_main_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     show_fade_context_menu(hwnd, clipIdx, zone == CLIP_HIT_FADE_IN_HANDLE, screenPt.x, screenPt.y);
                     return 0;
                 }
+            }
+
+            
+            if (clipIdx != -1) {
+                seq_lock();
+                if (!g_Seq.clips[clipIdx].isSelected && !ctrlOrShift) {
+                    for (int i = 0; i < g_Seq.clipCount; ++i) g_Seq.clips[i].isSelected = false;
+                    g_Seq.clips[clipIdx].isSelected = true;
+                }
+                seq_unlock();
             }
 
             g_Seq.dragStartX = mx;
@@ -1776,6 +1801,14 @@ static inline LRESULT cseq_main_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                             g_ClipGran[cloneIdx].ownFrames = NULL;
                             g_ClipGran[cloneIdx].ownLoaded = false;
                             memset(g_ClipGran[cloneIdx].grains, 0, sizeof(g_ClipGran[cloneIdx].grains));
+
+                            // A duplicated Quadrum clip has no rendered transient
+                            // buffers yet (g_ClipQuadrum isn't part of the Clip
+                            // struct). Re-initialize its synth state so the new
+                            // clip triggers notes immediately.
+                            if (g_Seq.clips[cloneIdx].clipKind == CLIP_KIND_QUADRUM) {
+                                synth_state_init_clip(cloneIdx);
+                            }
 
                             if (i == g_Seq.draggedClipIndex) newLeadIdx = cloneIdx;
                         }

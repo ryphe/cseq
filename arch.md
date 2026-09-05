@@ -1,4 +1,4 @@
-# cseq — Architecture & Design Guide
+# cseq — Architecture & Design Guide (1.2)
 
 This is the authoritative reference for how the engine is built, how it threads, how memory is owned, and how to extend it without breaking real-time safety.
 
@@ -74,7 +74,8 @@ The payoff: the audio thread has a hard, provable upper bound on latency, and
 UI stalls can never glitch the audio.
 
 ### Allocations
-- Everything is statically allocated - including maximum clip and note pools (2048), which are the main contributor to the cold boot of ~100MB RAM usage.
+- Everything is statically allocated - including maximum clip and note pools (2048);
+  which are the main contributor to the cold boot of ~100MB RAM usage.
 
 ---
 
@@ -262,6 +263,40 @@ primitives** and **single-producer/single-consumer rings**:
   clicked timeline track, recorded in `events.h` on clip/empty-space clicks —
   falling back to the first selected clip's track, then track 0.
 
+- **Sample-clip playback loop policy** (`render_frames`, `audio.h`; mirrored
+  by the waveform view in `wave_compute_spans`, `ui.h`). A sample clip reads
+  its sample linearly and decides whether to loop from the **full** sample
+  length (`s->frameCount`), never from the alt-slip offset:
+  - clip length **< 1×** sample → play once and stop;
+  - clip length **≥ 1× and < 2×** sample → play once, then silence;
+  - clip length **≥ 2×** sample → loop the sample to fill the clip.
+  When looping, the read position wraps back to the sample's **actual start**
+  (frame 0) — the alt-slip `sampleOffsetFrames` only sets the entry point, so
+  every repeat restarts at the beginning of the sample. Because the loop
+  decision ignores `sampleOffsetFrames`, alt-slipping never flips a clip
+  between looping and not, and the per-pass micro-fade is derived from the
+  monotonic clip-elapsed frames (not the wrapped read position) so repeated
+  passes of a looping, alt-slipped clip are never silenced.
+
+  The waveform view (`draw_waveform_clip`, `ui.h`) mirrors this policy: it
+  draws the sample once then silence for <2×, repeats it for ≥2×, and renders
+  a white **loop marker** at the sample-end boundary whenever the clip is
+  longer than the playable sample — regardless of whether the clip was
+  alt-slipped. The marker and the loop flag are part of the wave cache key, so
+  a looping vs. non-looping render never shares a stale cached bitmap.
+
+- **Fade curve & alt-slip apply to the whole selection** (`events.h`,
+  `dialogs.h`). Two right-drag/edit interactions operate on all selected clips
+  and must never silently collapse the selection:
+  - **Fade context menu.** In `WM_RBUTTONDOWN` the fade-handle hit test runs
+    *before* any selection change, so right-clicking a fade handle preserves
+    the current multi-selection; `show_fade_context_menu` then applies the new
+    curve type to the clicked clip and every selected clip.
+  - **Alt-slip.** Starting a slip drag does not deselect; the selection logic
+    collapses to a single clip only when the clicked clip was unselected, and
+    the slip update loop (`WM_MOUSEMOVE`) moves every selected clip's
+    `sampleOffsetFrames` together.
+
 ### 3.2 Voice allocation
 
 - **Halo (poly synth):** a fixed pool of `HALO_MAX_VOICES` voices. A note-on
@@ -423,7 +458,8 @@ Sections 5.1–5.2 are two context-menu slider features built on the shared
 modeless-popup-silder paradigm (see §4.1). Both are **non-destructive until
 committed**: they preview live and only write real state on `[APPLY]` / `ENTER`;
 `ESC` / click-outside / `[CANCEL]` discards. §5.3 documents the piano-roll MIDI
-clip source model (sample vs. SoundFont) and its dynamic clip naming.
+clip source model (sample vs. SoundFont) and its dynamic clip naming. §5.4
+documents how Shift+Wheel rate changes are debounced into their own undo step.
 
 ### 5.1 Track-Level Trigger Probability
 
@@ -591,6 +627,76 @@ no stored-name persistence. This mirrors the existing sample-clip naming
 `"MIDI (N notes)"`. All of this is UI-thread-only — the audio thread's
 sample-vs-soundfont resolution (`audio.h:291-297`) is unchanged.
 
+### 5.4 Rate-change undo: Shift+Wheel debounce & flush
+
+**Purpose.** Shift+Wheel over a clip adjusts its playback rate
+(`Clip.playbackRate`). Because a wheel tick is a single continuous gesture —
+one scroll can emit many `WM_MOUSEWHEEL` messages — the rate change is **not**
+committed as an undo step per tick. Instead it is debounced so that a burst of
+ticks collapses into one undo step, and the step is forced to fire before any
+*different* action (like starting a drag) so the rate change never gets glued
+onto another edit.
+
+**Data model** (`types.h`, `SequencerState`). A single
+`ULONGLONG rateUndoDebounceTimer` field: `0` = no pending undo, `>0` = the
+`GetTickCount64()` expiry time in ms. It is zero-initialized at startup (the
+whole `g_Seq` struct is zeroed) and explicitly reset to `0` in
+`reset_to_init_state` (`dialogs.h`).
+
+**Arming** (`events.h`, `WM_MOUSEWHEEL`). The timer is set **only** in the
+`shiftHeld` branch — i.e. only for rate adjustments:
+
+```c
+if (shiftHeld) {
+    // ... playbackRate += deltaRate on the clip / all selected clips ...
+    g_Seq.rateUndoDebounceTimer = GetTickCount64() + 300;
+}
+```
+
+Volume adjustments (the `else if isSelected` / `else` branches) deliberately do
+**not** touch the timer. A plain wheel over a clip adjusts volume continuously
+with no undo debounce, so the timer's presence is a reliable signal that a
+rate change is in flight.
+
+**Firing** (`events.h`, `WM_TIMER`). If the user just stops scrolling, the
+timer fires after 300 ms and commits the rate change as its own undo step:
+
+```c
+if (g_Seq.rateUndoDebounceTimer != 0 &&
+    GetTickCount64() >= g_Seq.rateUndoDebounceTimer) {
+    g_Seq.rateUndoDebounceTimer = 0;
+    push_undo_state();
+    g_Seq.isModified = true;
+    update_window_title();
+}
+```
+
+**Flush** (`events.h`, `WM_LBUTTONDOWN`). If the user starts a new action
+before the timer fires — most importantly, mousedown on a clip to begin a
+drag — the pending rate-undo is flushed immediately, **before** any selection
+changes or drag setup. This runs under `seq_lock()` (it sits inside the clip
+hit-test block) and guarantees the rate change and the drag each get their own
+undo step:
+
+```c
+Clip* c = &g_Seq.clips[clipIdx];
+
+// --- Flush any pending rate-change undo before starting a new action ---
+if (g_Seq.rateUndoDebounceTimer != 0) {
+    g_Seq.rateUndoDebounceTimer = 0;
+    push_undo_state();          // this sets g_Seq.isModified = true
+    update_window_title();
+}
+```
+
+**Why the two paths are both needed.** The debounce alone would eventually
+commit the rate change, but if the user begins a drag within the 300 ms window
+the timer would fire mid-drag and produce a rate-undo interleaved with the
+drag-undo. The flush forces the pending rate change to be committed first, so
+the subsequent drag pushes a clean, separate undo state. The whole mechanism
+adds no extra timers or locks — it reuses the existing 16 ms `WM_TIMER` slot
+and the existing `seq_lock()`.
+
 ---
 
 ## 6. The FNV Hash Tree & the Double-Buffered GDI Pipeline
@@ -646,10 +752,11 @@ Merkle tree, but with a flat, cache-friendly layout.
   unchanged chunks keep their cached hash, so a one-clip edit recomputes a
   handful of chunk hashes instead of the whole track.
 - **Param hash** (`compute_timeline_param_hash`, `ui.h:2461`): a second,
-  cheaper root over global state — zoom, BPM, visibleBarCount, gridDivision,
-  trackCount, clipCount, and per-track mute/solo/volume/granular flags. It is
-  checked before the content hash because it changes far more often and is
-  cheaper to fold.
+cheaper root over global state — zoom, BPM, visibleBarCount, gridDivision,
+trackCount, clipCount, per-track mute/solo/volume/granular flags, and
+**per-track active filter status**(`enabled && typeMask != 0`).
+It is checked before the content hash because it changes far more often
+and is cheaper to fold.
 
 `is_timeline_dirty(w, h)` (`ui.h:2498`) is the gate: it returns true on a
 window resize or explicit `g_timelineDirty`, else compares the param hash, then
