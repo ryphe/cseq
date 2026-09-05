@@ -39,6 +39,7 @@ SequencerState g_Seq;
 HWND g_hWnd = NULL;
 
 volatile LONG g_shuttingDown = 0;
+volatile LONG g_haloActiveVoices = 0;
 
  
 GranularEngine  g_TrackGran[MAX_TRACKS];
