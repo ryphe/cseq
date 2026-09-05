@@ -68,4 +68,4 @@ Here's the expanded controls table — one row per major interaction surface, wi
 
 - [miniaudio](https://github.com/mackron/miniaudio)
 - [TinySoundFont](https://github.com/schellingb/TinySoundFont)
-- [Airwindows](https://github.com/airwindows/airwindows) (ported `SmoothEQ3`)
+- [Airwindows](https://github.com/airwindows/airwindows) (`SmoothEQ3`)
