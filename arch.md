@@ -1,4 +1,4 @@
-# cseq — Architecture & Design Guide (1.33)
+# cseq — Architecture & Design Guide (1.34)
 
 This is the authoritative reference for how the engine is built, how it threads, how memory is owned, and how to extend it without breaking real-time safety.
 
@@ -377,6 +377,13 @@ primitives** and **single-producer/single-consumer rings**:
 - **Granular `ownFrames`.** Private per-engine PCM is freed under `seq_lock`
   (e.g. `project.h:836-846`) and only while the device is stopped or on
   explicit engine teardown.
+- **Track-level granular engines ride the undo path.** `UndoSnapshot`
+  (`types.h`) carries a per-track `trackGran` array alongside the per-clip
+  `clipGran` and the FX rack, so `push_undo_state`/`undo`/`redo` capture and
+  restore `g_TrackGran[]` (via `gran_engine_to_snapshot` /
+  `gran_snapshot_to_engine`). `reset_to_init_state` (`dialogs.h`) wipes
+  `g_TrackGran[]` after `push_undo_state()`, so a project reset is now
+  undoable for track granular state, matching the FX rack.
 - **Detached workers must not outlive the locks they take.** Job workers
   (`SaveProject`, `LoadProject`, `Export`, `SFontLoad`) are created detached.
   On window close, `WinMain` sets `g_shuttingDown` and drains the job system
@@ -488,7 +495,11 @@ an integrated audition voice (`headers/audition.h`):
    decodes the selected file into the *inactive* audition ping-pong slot,
    builds min/max waveform peaks, and publishes via `audition_play()`. It is
    single-flight (`g_mediaPreviewBusy`) with a `g_mediaPreviewGen` generation
-   counter so stale decodes are discarded.
+   counter so stale decodes are discarded. The decode runs through
+   `media_decode_all` (`media.h`), which mirrors `load_audio_file`'s fallback
+   chain (miniaudio → Media Foundation → stb_vorbis → Opus), so every listed
+   format — wav/aiff/aif/flac/mp3/ogg/opus/m4a/aac/wma — previews, not just the
+   ones miniaudio alone can open.
 4. **Real-time voice.** `audition_process_voice` (`audition.h:162`) runs inside
    the master audio callback and must be **allocation-free, I/O-free, and
    GUI-free** (Hard Rules 1–2). It reads control state via `Interlocked*`,
@@ -1251,20 +1262,18 @@ The audio thread renders the preview only while the audition flags are set
 (`auditionHeld` or `isAuditionPlaying`), so clearing them is what actually
 silences it.
 
-**Known gap: the last release tail is truncated.** A slot's tail renders
-only while the preview keeps running. When the *final* held key is released
-(or PLAY stops), `auditionHeld`/`isAuditionPlaying` drop, the callback's
-keep-alive check consults only `synth_editor_has_ringing` — a Halo/Quadrum
-engine check that returns false for standard MIDI clips (`synth.h:588-608`)
-— and `midi_editor_process_preview` early-outs on `!playLoop && !audHeld`
-(`audio.h:522`), so the tail of the last key is cut to the ~6 ms master fade
-(`kRampStep` = 1/256 per frame) instead of the Release knob's time. Tails
-while other keys remain held are unaffected. Lifting this means keeping the
-preview alive while any audition slot is still keyed — the slot table is a
-function-local static under `midi_lock`, so the gate cannot see it today.
-`tests/adsr_verify.c` pins the shared envelope shape numerically (A/D/S
-levels, release-from-level-at-release, sustain-0 semantics, freeze-frame
-continuity).
+**Release-tail keep-alive.** The callback's keep-alive gate consults both
+`synth_editor_has_ringing` (Halo/Quadrum engine voices) **and**
+`midi_audition_has_ringing` (`audio.h:459`), which checks whether any of the 8
+standard sample/SoundFont audition slots (`s_aud[8]`) is still keyed. The
+preview's early-out (`audio.h:529`) also honors `midi_audition_has_ringing`.
+So when the *final* held key is released, the callback stays alive and
+`midi_editor_process_preview` keeps rendering until every slot's tail fades to
+zero, letting the last key's release tail ring out through the Release knob's
+time instead of being cut to the ~6 ms master fade (`kRampStep` = 1/256 per
+frame). `tests/adsr_verify.c` pins the shared envelope shape numerically
+(A/D/S levels, release-from-level-at-release, sustain-0 semantics,
+freeze-frame continuity).
 
 **Playhead repaint is independent of knob edits.** The playhead is a *dynamic
 overlay* drawn on top of the cached piano-roll bitmap each frame and repainted

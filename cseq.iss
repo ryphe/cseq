@@ -1,7 +1,7 @@
 [Setup]
 AppId={{C8C1AF95-C753-4E51-AF9D-9119755A8394}
 AppName=cseq
-AppVersion=1.33
+AppVersion=1.34
 AppPublisher=ryphe
 DefaultDirName={autopf}\cseq
 UsePreviousAppDir=no
@@ -11,7 +11,7 @@ UninstallDisplayIcon={app}\cseq.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
 OutputDir=.
-OutputBaseFilename=cseq_setup_1.33
+OutputBaseFilename=cseq_setup_1.34
 WizardStyle=modern
 ChangesAssociations=yes
 DirExistsWarning=no

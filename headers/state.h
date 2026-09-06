@@ -148,6 +148,17 @@ static inline void free_undo_snapshot(UndoSnapshot* s) {
         free(s->clipGran);
         s->clipGran = NULL;
     }
+    if (s->trackGran) {
+        for (int t = 0; t < MAX_TRACKS; ++t) {
+            if (s->trackGran[t].ownFrames) {
+                free(s->trackGran[t].ownFrames);
+                s->trackGran[t].ownFrames = NULL;
+            }
+            s->trackGran[t].ownLoaded = false;
+        }
+        free(s->trackGran);
+        s->trackGran = NULL;
+    }
     if (s->trackFx) {
         free(s->trackFx);
         s->trackFx = NULL;
@@ -186,6 +197,7 @@ static inline void push_undo_state(void) {
     UndoSnapshot* s = &g_Seq.undoStack[g_Seq.undoCount];
     s->clipCount = g_Seq.clipCount;
     s->trackFx = NULL;
+    s->trackGran = NULL;
     memcpy(s->trackSidechainSource, g_Seq.trackSidechainSource, sizeof(s->trackSidechainSource));
     if (g_Seq.clipCount > 0) {
         s->clips = (Clip*)malloc(sizeof(Clip) * g_Seq.clipCount);
@@ -211,6 +223,14 @@ static inline void push_undo_state(void) {
     s->trackFx = (FxTrackSnapshot*)malloc(sizeof(FxTrackSnapshot) * MAX_TRACKS);
     if (s->trackFx) {
         fx_snapshot_save(s->trackFx);
+    }
+
+    // Capture track-level granular engines for all tracks
+    s->trackGran = (GranClipSnapshot*)malloc(sizeof(GranClipSnapshot) * MAX_TRACKS);
+    if (s->trackGran) {
+        for (int t = 0; t < MAX_TRACKS; ++t) {
+            gran_engine_to_snapshot(&s->trackGran[t], &g_TrackGran[t]);
+        }
     }
 
     g_Seq.undoCount++;
@@ -241,6 +261,7 @@ static inline void undo_last_action(void) {
     UndoSnapshot* r = &g_Seq.redoStack[g_Seq.redoCount++];
     r->clipCount = g_Seq.clipCount;
     r->trackFx = NULL;
+    r->trackGran = NULL;
     if (g_Seq.clipCount > 0) {
         r->clips = (Clip*)malloc(sizeof(Clip) * g_Seq.clipCount);
         r->clipGran = (GranClipSnapshot*)malloc(sizeof(GranClipSnapshot) * g_Seq.clipCount);
@@ -264,6 +285,14 @@ static inline void undo_last_action(void) {
     if (r->trackFx) {
         fx_snapshot_save(r->trackFx);
     }
+
+    // Capture current track-level granular engines into redoStack
+    r->trackGran = (GranClipSnapshot*)malloc(sizeof(GranClipSnapshot) * MAX_TRACKS);
+    if (r->trackGran) {
+        for (int t = 0; t < MAX_TRACKS; ++t) {
+            gran_engine_to_snapshot(&r->trackGran[t], &g_TrackGran[t]);
+        }
+    }
     memcpy(r->trackSidechainSource, g_Seq.trackSidechainSource, sizeof(r->trackSidechainSource));
 
     // Restore clips and synths
@@ -284,6 +313,13 @@ static inline void undo_last_action(void) {
     // Restore FX rack state
     if (s->trackFx) {
         fx_snapshot_restore(s->trackFx);
+    }
+
+    // Restore track-level granular engines
+    if (s->trackGran) {
+        for (int t = 0; t < MAX_TRACKS; ++t) {
+            gran_snapshot_to_engine(&g_TrackGran[t], &s->trackGran[t], -1, t);
+        }
     }
     memcpy(g_Seq.trackSidechainSource, s->trackSidechainSource, sizeof(g_Seq.trackSidechainSource));
 
@@ -322,6 +358,7 @@ static inline void redo_last_action(void) {
     UndoSnapshot* u = &g_Seq.undoStack[g_Seq.undoCount];
     u->clipCount = g_Seq.clipCount;
     u->trackFx = NULL;
+    u->trackGran = NULL;
     if (g_Seq.clipCount > 0) {
         u->clips = (Clip*)malloc(sizeof(Clip) * g_Seq.clipCount);
         u->clipGran = (GranClipSnapshot*)malloc(sizeof(GranClipSnapshot) * g_Seq.clipCount);
@@ -347,6 +384,14 @@ static inline void redo_last_action(void) {
     if (u->trackFx) {
         fx_snapshot_save(u->trackFx);
     }
+
+    // Capture current track-level granular engines into undoStack
+    u->trackGran = (GranClipSnapshot*)malloc(sizeof(GranClipSnapshot) * MAX_TRACKS);
+    if (u->trackGran) {
+        for (int t = 0; t < MAX_TRACKS; ++t) {
+            gran_engine_to_snapshot(&u->trackGran[t], &g_TrackGran[t]);
+        }
+    }
     memcpy(u->trackSidechainSource, g_Seq.trackSidechainSource, sizeof(u->trackSidechainSource));
     g_Seq.undoCount++;
 
@@ -368,6 +413,13 @@ static inline void redo_last_action(void) {
     // Restore FX rack state
     if (r->trackFx) {
         fx_snapshot_restore(r->trackFx);
+    }
+
+    // Restore track-level granular engines
+    if (r->trackGran) {
+        for (int t = 0; t < MAX_TRACKS; ++t) {
+            gran_snapshot_to_engine(&g_TrackGran[t], &r->trackGran[t], -1, t);
+        }
     }
     memcpy(g_Seq.trackSidechainSource, r->trackSidechainSource, sizeof(g_Seq.trackSidechainSource));
 

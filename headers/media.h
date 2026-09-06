@@ -152,7 +152,7 @@ static void media_set_cur_dir(const char* dir) {
 static inline bool media_ext_supported(const char* path) {
     const char* dot = strrchr(path, '.');
     if (!dot) return false;
-    static const char* kExts[] = { ".wav", ".aiff", ".aif", ".flac", ".mp3", ".ogg" };
+    static const char* kExts[] = { ".wav", ".aiff", ".aif", ".flac", ".mp3", ".ogg", ".opus", ".m4a", ".aac", ".wma" };
     for (int i = 0; i < (int)(sizeof(kExts) / sizeof(kExts[0])); ++i) {
         if (_stricmp(dot, kExts[i]) == 0) return true;
     }
@@ -169,7 +169,180 @@ static inline const char* media_format_label(const char* path) {
     if (_stricmp(dot, ".flac") == 0) return "FLAC";
     if (_stricmp(dot, ".mp3") == 0)  return "MP3";
     if (_stricmp(dot, ".ogg") == 0)  return "OGG";
+    if (_stricmp(dot, ".opus") == 0) return "OPUS";
+    if (_stricmp(dot, ".m4a") == 0)  return "M4A";
+    if (_stricmp(dot, ".aac") == 0)  return "AAC";
+    if (_stricmp(dot, ".wma") == 0)  return "WMA";
     return "";
+}
+
+// ---------------------------------------------------------------------------
+// Full decode of a media file into a freshly-malloc'd interleaved stereo float
+// buffer at SAMPLE_RATE. Mirrors load_audio_file's fallback chain (miniaudio ->
+// Media Foundation -> stb_vorbis -> Opus) so every listed format actually
+// previews. Returns the frame count (0 on failure); the caller frees *out.
+// Runs on the background preview worker, never on the audio/UI threads.
+// ---------------------------------------------------------------------------
+static ma_uint64 media_decode_all(const char* path, float** out) {
+    *out = NULL;
+
+    WCHAR wpath[MAX_PATH * 2];
+    bool haveWide = (utf8_to_wide_buf(path, wpath, (int)(sizeof(wpath) / sizeof(wpath[0]))) > 0);
+
+    // 1) miniaudio: wav / aiff / aif / flac / mp3
+    ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, NUM_CHANNELS, SAMPLE_RATE);
+    ma_decoder dec;
+    if (haveWide ? (ma_decoder_init_file_w(wpath, &cfg, &dec) == MA_SUCCESS)
+                 : (ma_decoder_init_file(path, &cfg, &dec) == MA_SUCCESS)) {
+        ma_uint64 total = 0;
+        ma_decoder_get_length_in_pcm_frames(&dec, &total);
+        if (total == 0) { ma_decoder_uninit(&dec); goto try_mf; }
+        float* buf = (float*)malloc(sizeof(float) * NUM_CHANNELS * (size_t)total);
+        if (!buf) { ma_decoder_uninit(&dec); return 0; }
+        ma_uint64 got = 0;
+        ma_decoder_read_pcm_frames(&dec, buf, total, &got);
+        ma_decoder_uninit(&dec);
+        if (got == 0) { free(buf); goto try_mf; }
+        *out = buf;
+        return got;
+    }
+
+try_mf:
+    // 2) Media Foundation: m4a / aac / wma (whatever the OS can decode)
+    {
+        HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE);
+        BOOL needUninit = SUCCEEDED(hr);
+
+        IMFSourceReader* pReader = NULL;
+        hr = MFCreateSourceReaderFromURL(wpath, NULL, &pReader);
+        if (FAILED(hr) || !pReader) {
+            if (needUninit) CoUninitialize();
+            goto try_ogg;
+        }
+
+        IMFMediaType* pType = NULL;
+        hr = MFCreateMediaType(&pType);
+        if (FAILED(hr) || !pType) {
+            pReader->lpVtbl->Release(pReader);
+            if (needUninit) CoUninitialize();
+            goto try_ogg;
+        }
+
+        pType->lpVtbl->SetGUID(pType, &MF_MT_MAJOR_TYPE, &MFMediaType_Audio);
+        pType->lpVtbl->SetGUID(pType, &MF_MT_SUBTYPE, &MFAudioFormat_Float);
+        pType->lpVtbl->SetUINT32(pType, &MF_MT_AUDIO_NUM_CHANNELS, NUM_CHANNELS);
+        pType->lpVtbl->SetUINT32(pType, &MF_MT_AUDIO_SAMPLES_PER_SECOND, SAMPLE_RATE);
+        pType->lpVtbl->SetUINT32(pType, &MF_MT_AUDIO_BITS_PER_SAMPLE, 32);
+        pType->lpVtbl->SetUINT32(pType, &MF_MT_AUDIO_BLOCK_ALIGNMENT, NUM_CHANNELS * sizeof(float));
+        pType->lpVtbl->SetUINT32(pType, &MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
+                                 SAMPLE_RATE * NUM_CHANNELS * sizeof(float));
+
+        hr = pReader->lpVtbl->SetCurrentMediaType(pReader,
+                                                  (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM,
+                                                  NULL, pType);
+        pType->lpVtbl->Release(pType);
+        pType = NULL;
+
+        if (FAILED(hr)) {
+            pReader->lpVtbl->Release(pReader);
+            if (needUninit) CoUninitialize();
+            goto try_ogg;
+        }
+
+        size_t capacity = 0, frames = 0;
+        float* pFrames = NULL;
+        const size_t chunkHint = 8192;
+
+        for (;;) {
+            DWORD streamIndex = 0, flags = 0;
+            LONGLONG timestamp = 0;
+            IMFSample* pSample = NULL;
+            hr = pReader->lpVtbl->ReadSample(pReader,
+                                             (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM,
+                                             0, &streamIndex, &flags, &timestamp, &pSample);
+            if (FAILED(hr) || (flags & MF_SOURCE_READERF_ENDOFSTREAM)) {
+                if (pSample) pSample->lpVtbl->Release(pSample);
+                break;
+            }
+            if (!pSample) continue;
+
+            IMFMediaBuffer* pBuffer = NULL;
+            hr = pSample->lpVtbl->ConvertToContiguousBuffer(pSample, &pBuffer);
+            if (SUCCEEDED(hr) && pBuffer) {
+                BYTE* pData = NULL;
+                DWORD cbMax = 0, cb = 0;
+                hr = pBuffer->lpVtbl->Lock(pBuffer, &pData, &cbMax, &cb);
+                if (SUCCEEDED(hr) && pData && cb >= sizeof(float) * NUM_CHANNELS) {
+                    size_t thisFrames = cb / (sizeof(float) * NUM_CHANNELS);
+                    if (frames + thisFrames > capacity) {
+                        size_t newCap = (capacity == 0) ? thisFrames * 2 : capacity * 2;
+                        if (newCap < frames + thisFrames) newCap = frames + thisFrames + chunkHint;
+                        float* n = (float*)realloc(pFrames, newCap * NUM_CHANNELS * sizeof(float));
+                        if (!n) {
+                            pBuffer->lpVtbl->Unlock(pBuffer);
+                            pBuffer->lpVtbl->Release(pBuffer);
+                            pSample->lpVtbl->Release(pSample);
+                            free(pFrames);
+                            pReader->lpVtbl->Release(pReader);
+                            if (needUninit) CoUninitialize();
+                            goto try_ogg;
+                        }
+                        pFrames = n;
+                        capacity = newCap;
+                    }
+                    memcpy(pFrames + frames * NUM_CHANNELS, pData,
+                           thisFrames * NUM_CHANNELS * sizeof(float));
+                    frames += thisFrames;
+                    pBuffer->lpVtbl->Unlock(pBuffer);
+                }
+                pBuffer->lpVtbl->Release(pBuffer);
+            }
+            pSample->lpVtbl->Release(pSample);
+        }
+
+        pReader->lpVtbl->Release(pReader);
+        if (needUninit) CoUninitialize();
+
+        if (!pFrames || frames == 0) {
+            if (pFrames) free(pFrames);
+            goto try_ogg;
+        }
+        *out = pFrames;
+        return frames;
+    }
+
+try_ogg:
+    // 3) stb_vorbis: ogg
+    {
+        OggDecoder d;
+        memset(&d, 0, sizeof(d));
+        if (ogg_open(&d, path) && ogg_decode_all(&d) && d.pcm && d.frames > 0) {
+            float* buf = d.pcm;
+            ma_uint64 frames = d.frames;
+            d.pcm = NULL; // adopt ownership
+            ogg_close(&d);
+            *out = buf;
+            return frames;
+        }
+        ogg_close(&d);
+    }
+
+    // 4) vendored Opus
+    {
+        OpusWrapDecoder d;
+        memset(&d, 0, sizeof(d));
+        if (opus_open(&d, path) && opus_decode_all(&d) && d.pcm && d.frames > 0) {
+            float* buf = d.pcm;
+            ma_uint64 frames = d.frames;
+            d.pcm = NULL; // adopt ownership
+            opus_close(&d);
+            *out = buf;
+            return frames;
+        }
+        opus_close(&d);
+    }
+
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -411,39 +584,22 @@ static DWORD WINAPI media_preview_thread_proc(LPVOID param) {
 
     LONG gen = InterlockedCompareExchange(&g_mediaPreviewGen, 0, 0);
 
-    wchar_t wpath[MAX_PATH];
-    utf8_to_wide_buf(path, wpath, MAX_PATH);
-    ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, 2, SAMPLE_RATE);
-    ma_decoder dec;
-    if (ma_decoder_init_file_w(wpath, &cfg, &dec) != MA_SUCCESS) {
+    float* decoded = NULL;
+    ma_uint64 framesRead = media_decode_all(path, &decoded);
+    if (framesRead == 0 || !decoded) {
+        if (decoded) free(decoded);
         InterlockedExchange(&g_mediaPreviewBusy, 0);
         return 0;
     }
-
-    ma_uint64 totalFrames = 0;
-    ma_decoder_get_length_in_pcm_frames(&dec, &totalFrames);
-    if (totalFrames > AUDITION_MAX_FRAMES) totalFrames = AUDITION_MAX_FRAMES;
+    if (framesRead > AUDITION_MAX_FRAMES) framesRead = AUDITION_MAX_FRAMES;
 
     // Choose the inactive ping-pong slot (the one the audio thread is not
     // currently reading).
     LONG active = InterlockedCompareExchange(&g_audState.activeIdx, 0, 0);
     int bufIdx = (active == 1) ? 0 : 1;
     float* buf = audition_get_write_buffer(bufIdx);
-
-    ma_uint64 framesRead = 0;
-    while (framesRead < totalFrames) {
-        ma_uint32 want = (ma_uint32)(totalFrames - framesRead);
-        if (want > 4096) want = 4096;
-        ma_uint64 got = 0;
-        ma_decoder_read_pcm_frames(&dec, buf + framesRead * 2, want, &got);
-        if (got == 0) break;
-        framesRead += got;
-    }
-    ma_decoder_uninit(&dec);
-    if (framesRead == 0) {
-        InterlockedExchange(&g_mediaPreviewBusy, 0);
-        return 0;
-    }
+    memcpy(buf, decoded, (size_t)framesRead * NUM_CHANNELS * sizeof(float));
+    free(decoded);
 
     // Build min/max peaks for the waveform strip.
     float* pmin = g_mediaPeaksMin[bufIdx];

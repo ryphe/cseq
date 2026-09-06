@@ -195,19 +195,19 @@ static void quadrum_get_preset(VoiceType voice, QuadrumParams* p) {
     switch (voice) {
         case VOICE_KICK:
             p->pitch = 50.0;
-            p->pitch_env = 0.82;
-            p->pitch_decay = 0.022;
+            p->pitch_env = 0.90;
+            p->pitch_decay = 0.020;
             p->fm_ratio = 1.0;
-            p->fm_depth = 0.15;
-            p->noise_mix = 0.02;
+            p->fm_depth = 0.20;
+            p->noise_mix = 0.04;
             p->noise_decay = 0.015;
             p->noise_cutoff = 2200.0;
-            p->click = 0.32;
+            p->click = 0.45;
             p->filter_cutoff = 2800.0;
             p->filter_q = 0.85;
             p->filter_type = 0.0;
-            p->drive = 2.2;
-            p->decay = 0.48;
+            p->drive = 2.8;
+            p->decay = 0.42;
             p->clap_taps = 1.0;
             p->clap_spread = 0.01;
             break;
@@ -238,14 +238,14 @@ static void quadrum_get_preset(VoiceType voice, QuadrumParams* p) {
             p->fm_ratio = 1.0;
             p->fm_depth = 0.0;
             p->noise_mix = 1.0;
-            p->noise_decay = 0.22;
-            p->noise_cutoff = 1150.0;
+            p->noise_decay = 0.15;
+            p->noise_cutoff = 2200.0;
             p->click = 0.40;
-            p->filter_cutoff = 2200.0;
-            p->filter_q = 1.8;
+            p->filter_cutoff = 1600.0;
+            p->filter_q = 1.5;
             p->filter_type = 2.0;
             p->drive = 1.9;
-            p->decay = 0.32;
+            p->decay = 0.26;
             p->clap_taps = 4.0;
             p->clap_spread = 0.012;
             break;

@@ -3792,8 +3792,8 @@ static inline void render_ui(HDC hdc, const RECT *clientRect) {
      
     int btnY = h - scale_y(38);
     int availW = get_track_header_width();
-    int btnMargin = scale_x(6);
-    int btnGap = scale_x(4);
+    int btnMargin = scale_x(4);
+    int btnGap = scale_x(3);
     int btnW = (availW - btnMargin * 2 - btnGap * 2) / 3, btnH = scale_y(20);
     int totalBtnsW = btnW * 3 + btnGap * 2;
     int btnStartX = btnMargin;
@@ -4026,7 +4026,7 @@ static inline void render_ui(HDC hdc, const RECT *clientRect) {
     int activeBeat = (int)fmodf(currentBeat, bpb);
     bool playing = seq_is_playing();
     float pulse = playing ? (1.0f - beatFrac * 0.65f) : 0.0f;
-    int pulseGap = scale_x(4);
+    int pulseGap = scale_x(3);
     int blockW = (totalBtnsW - (pulseCount - 1) * pulseGap) / pulseCount;
     int blockH = scale_y(5);
     int lineY = h - scale_y(13);
@@ -4037,7 +4037,7 @@ static inline void render_ui(HDC hdc, const RECT *clientRect) {
 
         COLORREF sqCol = RGB(28, 33, 42);
         if (playing && b == activeBeat) {
-            COLORREF baseCol = (b == 0) ? RGB(255, 200, 70) : RGB(80, 240, 180);
+            COLORREF baseCol = (b == 0) ? RGB(80, 240, 255) : RGB(80, 240, 180);
             sqCol = RGB((BYTE)(GetRValue(baseCol) * pulse),
                         (BYTE)(GetGValue(baseCol) * pulse),
                         (BYTE)(GetBValue(baseCol) * pulse));

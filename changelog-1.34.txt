@@ -1,0 +1,11 @@
+- `ui.h` - reduced btnMargin from scale_x(6) → scale_x(4) and btnGap from scale_x(4) → scale_x(3)
+- `ui.h` - changed first pulse color from yellow RGB(255, 200, 70) to cyan RGB(80, 240, 255)
+- `media.h` - media explorer now lists all supported formats (wav/aiff/aif/flac/mp3/ogg/opus/m4a/aac/wma) via extended filter + format labels
+- `media.h` - added media_decode_all fallback chain (miniaudio → Media Foundation → stb_vorbis → Opus) so every listed format previews, not just miniaudio-decodable ones
+- `types.h` - added trackGran to UndoSnapshot
+- `state.h` - track-level granular engines (g_TrackGran) are now captured/restored in push_undo_state/undo/redo and freed in free_undo_snapshot, so a project reset is undoable for track granular state (mirrors the FX rack)
+- `synth_halo.h` - reduced bandpass dry-body blend in svf_tick from 0.35 to 0.15 so BP keeps its character without as much dry signal bleed
+- `synth_halo.h` - fattened default Halo preset (Obsidian Pad): unison_voices 4→5, unison_spread 6→10, harm_decay 0.20→0.12, partial_tilt -0.5→-0.3, filter_cutoff 2200→3000, drive 1.15→1.3, amp_sustain 0.75→0.85
+- `synth_halo.h` - fattened Halo Sub Bass preset: unison_voices 2→3, unison_spread 4→8, partial_count 2→3, partial_tilt -1.2→-0.9, filter_cutoff 420→520, drive 3.2→3.6, filter_q 1.8→2.0
+- `synth_quadrum.h` - kick preset more punchy: pitch_env 0.82→0.90, pitch_decay 0.022→0.020, fm_depth 0.15→0.20, noise_mix 0.02→0.04, click 0.32→0.45, drive 2.2→2.8, decay 0.48→0.42
+- `synth_quadrum.h` - clap preset less muddy (flam feel preserved): noise_cutoff 1150→2200, filter_cutoff 2200→1600, noise_decay 0.22→0.15, decay 0.32→0.26, filter_q 1.8→1.5

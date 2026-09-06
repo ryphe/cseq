@@ -241,7 +241,7 @@ static inline double svf_tick(SVFilter* f, double in, double fc, double Q, int t
 
     switch (type) {
         case 1:  return v0 - k * v1 - v2;   /* HP */
-        case 2:  return v1 + v0 * 0.35;     /* BP with dry body blend (never drops silent) */
+        case 2:  return v1 + v0 * 0.15;     /* BP with dry body blend (never drops silent) */
         case 0:
         case 3:
         default: return v2;                 /* LP */
@@ -478,20 +478,20 @@ static void halo_get_preset(int index, HaloPatch* p) {
     p->fm_feedback       = 0.08;
     p->osc_mix           = 0.70;
     p->detune            = 4.0;
-    p->unison_voices     = 4.0;
-    p->unison_spread     = 6.0;
+    p->unison_voices     = 5.0;
+    p->unison_spread     = 10.0;
 
     p->partial_count     = 8.0;
-    p->partial_tilt      = -0.5;
+    p->partial_tilt      = -0.3;
     p->noise_mix         = 0.02;
     p->noise_cutoff      = 3200.0;
-    p->harm_decay        = 0.20;
+    p->harm_decay        = 0.12;
     p->inharm            = 0.0;
 
-    p->filter_cutoff     = 2200.0;
+    p->filter_cutoff     = 3000.0;
     p->filter_q          = 1.1;
     p->filter_drive      = 1.0;
-    p->drive             = 1.15;
+    p->drive             = 1.3;
     p->filter_type       = 3.0;     /* SVF low-pass */
     p->lfo_filt_depth    = 350.0;
     p->key_track         = 0.40;
@@ -501,7 +501,7 @@ static void halo_get_preset(int index, HaloPatch* p) {
     p->amp_release       = 0.65;
     p->filter_env_depth  = 0.35;
     p->lfo_rate          = 0.8;
-    p->amp_sustain       = 0.75;
+    p->amp_sustain       = 0.85;
     p->vibrato           = 0.0;
 
     switch (index) {
@@ -576,18 +576,18 @@ static void halo_get_preset(int index, HaloPatch* p) {
             p->osc_mix = 0.45;
             p->detune = 3.0;
             p->waveform = 2.0;      /* Square (now warm, anti-aliased, and punchy) */
-            p->unison_voices = 2.0;
-            p->unison_spread = 4.0;
-            p->partial_count = 2.0;
-            p->partial_tilt = -1.2;
+            p->unison_voices = 3.0;
+            p->unison_spread = 8.0;
+            p->partial_count = 3.0;
+            p->partial_tilt = -0.9;
             p->noise_mix = 0.01;
             p->noise_cutoff = 800.0;
             p->harm_decay = 0.10;
             p->inharm = 0.0;
-            p->filter_cutoff = 420.0;
-            p->filter_q = 1.8;
+            p->filter_cutoff = 520.0;
+            p->filter_q = 2.0;
             p->filter_drive = 2.5;
-            p->drive = 3.2;
+            p->drive = 3.6;
             p->filter_type = 0.0;
             p->lfo_filt_depth = 60.0;
             p->key_track = 0.10;

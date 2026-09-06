@@ -40,9 +40,9 @@ This document describes the purpose and responsibilities of each source file in 
 ### `state.h`
 **Undo/redo system.** Implements the snapshot-based undo/redo pipeline:
 - `gran_engine_to_snapshot` / `gran_snapshot_to_engine`�serialize/deserialize granular engine state.
-- `push_undo_state`�captures current `g_Seq.clips` and `g_ClipGran` into the undo stack.
+- `push_undo_state`�captures current `g_Seq.clips`, `g_ClipGran`, `g_TrackGran`, and per-track FX into the undo stack.
 - `undo_last_action` / `redo_last_action`�restores a snapshot, reinitializes synth state, and invalidates the timeline cache.
-- Manages `MAX_UNDO_STATES` with full `Clip` and `GranClipSnapshot` storage�no pointer persistence.
+- Manages `MAX_UNDO_STATES` with full `Clip`, `GranClipSnapshot`, and `FxTrackSnapshot` storage�no pointer persistence. Track-level granular engines are captured/restored alongside the FX rack, so a project reset (and any edit) is fully undoable.
 
 ---
 
@@ -63,7 +63,7 @@ This document describes the purpose and responsibilities of each source file in 
 - `render_frames`�the **core mixing loop**. Renders sample clips, MIDI/SF2 clips, granular tracks, and synth clips (Halo/Quadrum) into per-track accumulators, then sums to stereo.
 - **External sidechain routing.** Per-track `trackSidechainSource` (pre-FX source track index, `-1` = internal) is fed into the routed track's slot-0 compressor via per-instance `scFeedL/scFeedR/scActive` (thread-safe against concurrent live+export renders).
 - `midi_process_clip_frames`�MIDI note playback with per-voice ADSR (sample or SF2 source).
-- `midi_editor_process_preview`�audition rendering for the piano roll. Synth clips drive their per-clip engines; standard sample/SoundFont clips render 8 polyphonic audition slots shaped by the clip ADSR knobs (`midi_adsr_gain`: A-D-S while held, `envLen` freeze + release tail on key-up) plus the looping [PLAY] voices with release tails. Known gap: the tail of the last released key is truncated (preview early-out + synth-only keep-alive gate).
+- `midi_editor_process_preview`�audition rendering for the piano roll. Synth clips drive their per-clip engines; standard sample/SoundFont clips render 8 polyphonic audition slots shaped by the clip ADSR knobs (`midi_adsr_gain`: A-D-S while held, `envLen` freeze + release tail on key-up) plus the looping [PLAY] voices with release tails. The callback's keep-alive gate consults `midi_audition_has_ringing` (alongside `synth_editor_has_ringing`), so the last released key's tail rings out through the Release knob's time rather than being cut to the master fade.
 - **Export.** `ExportTimelineThreadProc` runs on a background worker, renders the full timeline from a snapshot, and writes WAV at the configured bit depth (16/24/32).
 - `StereoLimiter`�lookahead limiter used in both live and export paths.
 
@@ -210,7 +210,7 @@ This document describes the purpose and responsibilities of each source file in 
 **Media Explorer (non-modal file browser + audition preview).**
 - Dual-pane directory browser (left: folders, right: audio files).
 - Background dir-scan worker (`media_scan_thread_proc`)�enumerates files and reads audio metadata (duration, sample rate, channels) with miniaudio.
-- Background preview decode worker (`media_preview_thread_proc`)�decodes selected file into the audition ping-pong buffer and builds waveform peaks.
+- Background preview decode worker (`media_preview_thread_proc`)�decodes selected file into the audition ping-pong buffer and builds waveform peaks. `media_decode_all` runs the full fallback chain (miniaudio � Media Foundation � stb_vorbis � Opus), so every listed format (wav/aiff/aif/flac/mp3/ogg/opus/m4a/aac/wma) previews.
 - **Audition voice integration** (`headers/audition.h`)�real-time preview playback mixed into the master bus.
 - Drag-and-drop from explorer to timeline (`media_import_at_point`).
 - **Import to canvas** (`media_import_to_canvas`)�adds selected file at the edit cursor with current preview speed.

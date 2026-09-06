@@ -281,6 +281,7 @@ typedef struct {
 typedef struct {
     Clip* clips;
     GranClipSnapshot* clipGran;
+    GranClipSnapshot* trackGran;
     struct FxTrackSnapshot* trackFx;
     int8_t trackSidechainSource[MAX_TRACKS];
     int               clipCount;
