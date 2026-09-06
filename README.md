@@ -64,7 +64,7 @@
 
 - [miniaudio](https://github.com/mackron/miniaudio)
 - [TinySoundFont](https://github.com/schellingb/TinySoundFont)
-- [Airwindows](https://github.com/airwindows/airwindows)
 - [stb_vorbis](https://github.com/nothings/stb)
 - [libogg](https://github.com/xiph/ogg)
 - [libopus](https://github.com/xiph/opus)
+- [Airwindows](https://github.com/airwindows/airwindows) -> `SmoothEQ3`
