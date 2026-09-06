@@ -470,6 +470,7 @@ static const char* HALO_PRESET_NAMES[HALO_PRESET_COUNT] = {
 };
 
 static void halo_get_preset(int index, HaloPatch* p) {
+    // Obsidian Pad (default)
     p->pitch_semi        = 0.0;
     p->waveform          = 0.0;     /* 0 = Sine carrier */
     p->fm_ratio          = 1.0;
@@ -478,7 +479,7 @@ static void halo_get_preset(int index, HaloPatch* p) {
     p->osc_mix           = 0.70;
     p->detune            = 4.0;
     p->unison_voices     = 4.0;
-    p->unison_spread     = 24.0;
+    p->unison_spread     = 6.0;
 
     p->partial_count     = 8.0;
     p->partial_tilt      = -0.5;
@@ -544,7 +545,7 @@ static void halo_get_preset(int index, HaloPatch* p) {
             p->detune = 2.0;
             p->waveform = 3.0;      /* Saw harmonic base */
             p->unison_voices = 2.0;
-            p->unison_spread = 7.0;
+            p->unison_spread = 6.0;
             p->partial_count = 12.0;
             p->partial_tilt = 0.6;
             p->noise_mix = 0.02;

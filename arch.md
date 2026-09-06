@@ -1,4 +1,4 @@
-# cseq — Architecture & Design Guide (1.3)
+# cseq — Architecture & Design Guide (1.31)
 
 This is the authoritative reference for how the engine is built, how it threads, how memory is owned, and how to extend it without breaking real-time safety.
 
@@ -481,6 +481,15 @@ documents how Shift+Wheel rate changes are debounced into their own undo step.
 transforms. §5.6 documents the piano-roll octave wheel and the VK-keyed
 keyboard audition set.
 
+**Master Volume dialog is the exception to the commit-on-APPLY rule.** It is a
+plain scalar gain (0–150%, default 100%) with no destructive side effect, so it
+does **not** follow the §5.1–5.2 preview-then-commit-on-ENTER pattern. Instead
+it live-applies to `g_Seq.masterVolume` (under `seq_lock`) on every drag/scroll/
+reset, so the bottom-dock MASTER number indicator updates in real time, and any
+close path (ENTER, ESC, click-outside, or the X button) simply keeps the applied
+value and marks the project modified. See `MasterVolWndProc` / `mastervol_apply`
+in `dialogs.h`.
+
 ### 5.1 Track-Level Trigger Probability
 
 **Purpose.** Right-click a track header → **"Trigger Probability..."** opens a
@@ -646,6 +655,23 @@ no stored-name persistence. This mirrors the existing sample-clip naming
 (`"<sampleName> (N notes)"`); a clip with no source at all still falls back to
 `"MIDI (N notes)"`. All of this is UI-thread-only — the audio thread's
 sample-vs-soundfont resolution (`audio.h:291-297`) is unchanged.
+
+**Clip title layout & gutters** (`ui.h`, `draw_waveform_clip`). The sample clip
+title is split into a left-aligned sample name and a right-aligned playback-rate
+badge (`"(1.25x)"`, shown only when `|playbackRate - 1| > 0.01`). Both are pinned
+into view symmetrically, independent of the scroll sub-window scratch state
+(`g_waveWinOn`/`g_waveWinR`): `textStartX` clamps to just inside the track header
+and `textEndX` clamps to just inside the visible canvas width (`canvasW`, passed
+in as an explicit parameter), so the badge no longer drifts to the clip's
+off-screen extremity when a rate change redraws the cache with `win == NULL`.
+Each label gets its own alpha gutter sized to its measured glyphs — the name
+scrim backs only the name, the rate scrim only the badge — merged into one
+contiguous box only when they collide on a narrow clip, so the middle of a wide
+clip shows clean waveform. The name yields space to the rate badge and
+ellipsizes (`DT_END_ELLIPSIS`); the badge is skipped entirely when it would draw
+over the track header. Because `playbackRate` is part of the content hash, a
+`Shift+Wheel` rate edit forces a full cache redraw that re-pins the badge in
+place.
 
 ### 5.4 Rate-change undo: Shift+Wheel debounce & flush
 

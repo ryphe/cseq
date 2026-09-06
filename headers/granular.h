@@ -1864,6 +1864,7 @@ static inline void open_clip_granular_dialog(HWND parentHwnd, int clipIdx) {
     e->sampleIndex = c->sampleIndex;
     e->trackIdx = trackIdx;
     e->clipIdx = clipIdx;
+    gran_audition_clear(e);   // drop any stale held note from a prior session
     seq_unlock();
 
     g_timelineDirty = true;

@@ -1846,7 +1846,7 @@ static inline int get_clip_stack_count(const Clip *c) {
     return count;
 }
 
-static inline void draw_waveform_clip(HDC hdc, const Clip *clip, const RECT *rect, bool isHovered, int stackCount) {
+static inline void draw_waveform_clip(HDC hdc, const Clip *clip, const RECT *rect, bool isHovered, int stackCount, int canvasW) {
     HFONT oldFont = SELECT_UI_FONT(hdc);
     if (!clip) return;
 
@@ -2125,9 +2125,25 @@ static inline void draw_waveform_clip(HDC hdc, const Clip *clip, const RECT *rec
         snprintf(rateBuf, sizeof(rateBuf), "(%.2fx)", clip->playbackRate);
     }
 
-    int textStartX = max(rect->left + scale_x(6), get_track_header_width() + scale_x(6));
-    int textEndX = rect->right - scale_x(6);
-    if (clip->isGranular) textEndX -= scale_x(46);
+    // Horizontal pinning: the sample name is left-pinned just inside the track
+    // header, and the rate badge is right-pinned just inside the visible canvas.
+    // This is symmetric and independent of the sub-window scratch state, so both
+    // stay in view whether the clip is clipped on the left, the right, or both.
+    int minVisibleX = get_track_header_width();
+    // This prevents the playback rate indicator from being under the scrollbar.
+    int maxVisibleX = canvasW - cseq_sb_width();
+    if (maxVisibleX < minVisibleX) maxVisibleX = minVisibleX;
+
+    int textStartX = max(rect->left + scale_x(6), minVisibleX + scale_x(6));
+
+    // Mirror rule for the right edge: pin to the visible canvas edge, falling
+    // back to the clip's true right edge when the clip end is on-screen. The
+    // granular badge offset only applies when the badge itself is in view.
+    int clipVisRight = min(rect->right, maxVisibleX);
+    int textEndX = clipVisRight - scale_x(6);
+    if (clip->isGranular && rect->right <= maxVisibleX) {
+        textEndX -= scale_x(46);
+    }
 
     if (clip->sampleIndex >= 0 && clip->sampleIndex < g_Seq.sampleCount) {
         AudioSample* s = &g_Seq.samples[clip->sampleIndex];
@@ -2235,28 +2251,85 @@ static inline void draw_waveform_clip(HDC hdc, const Clip *clip, const RECT *rec
         }
     }
 
-    {
-        // Scrim covers the visible title: ellipsized name portion + rate badge.
-        SIZE szName = { 0 }, szRate = { 0 };
-        wchar_t nameW[112], rateW[16];
-        if (utf8_to_wide_buf(nameBuf, nameW, 112) > 0)
-            GetTextExtentPoint32W(hdc, nameW, (int)wcslen(nameW), &szName);
+    // Measure the sample name and rate badge text up front so the gutters can
+    // be sized to the actual glyphs instead of the whole title band. The rate
+    // badge yields the right edge; the name truncates, never the rate.
+    SIZE szRate = { 0, 0 };
+    wchar_t rateW[16];
+    bool haveRateW = false;
+    if (rateBuf[0]) {
+        haveRateW = (utf8_to_wide_buf(rateBuf, rateW, 16) > 0);
+        if (haveRateW)
+            GetTextExtentPoint32W(hdc, rateW, (int)wcslen(rateW), &szRate);
         else
-            GetTextExtentPoint32A(hdc, nameBuf, (int)strlen(nameBuf), &szName);
-        if (rateBuf[0]) {
-            if (utf8_to_wide_buf(rateBuf, rateW, 16) > 0)
-                GetTextExtentPoint32W(hdc, rateW, (int)wcslen(rateW), &szRate);
-            else
-                GetTextExtentPoint32A(hdc, rateBuf, (int)strlen(rateBuf), &szRate);
+            GetTextExtentPoint32A(hdc, rateBuf, (int)strlen(rateBuf), &szRate);
+    }
+
+    SIZE szName = { 0, 0 };
+    wchar_t nameW[112];
+    bool haveNameW = (utf8_to_wide_buf(nameBuf, nameW, 112) > 0);
+    if (haveNameW)
+        GetTextExtentPoint32W(hdc, nameW, (int)wcslen(nameW), &szName);
+    else
+        GetTextExtentPoint32A(hdc, nameBuf, (int)strlen(nameBuf), &szName);
+
+    int nameEndX = textEndX - ((szRate.cx > 0) ? (szRate.cx + scale_x(6)) : 0);
+
+    COLORREF textBase = clip->isSelected ? RGB(255, 255, 255)
+                       : (isMuted ? RGB(135, 145, 160) : RGB(215, 225, 240));
+
+    // Independent gutters: the name scrim backs only the name text, the rate
+    // scrim only the rate badge, so the middle of a wide clip stays clean.
+    if (textEndX > textStartX + scale_x(6)) {
+        int titleScrimW = szName.cx + scale_x(8);
+        int maxTitleScrimW = max(0, nameEndX - textStartX + scale_x(4));
+        if (titleScrimW > maxTitleScrimW) titleScrimW = maxTitleScrimW;
+
+        int rateScrimX = textEndX - szRate.cx - scale_x(4);
+        int rateScrimW = (szRate.cx > 0) ? (szRate.cx + scale_x(8)) : 0;
+
+        // If the name and rate gutters are close enough to collide, merge them
+        // into one contiguous scrim to avoid a double-alpha seam.
+        if (szRate.cx > 0 && (textStartX + titleScrimW >= rateScrimX)) {
+            int mergedW = (textEndX - textStartX) + scale_x(8);
+            if (mergedW > 0)
+                draw_title_scrim(hdc, textStartX - scale_x(4), rect->top + scale_y(1),
+                                 mergedW, scale_y(22), fillCol);
+        } else {
+            if (titleScrimW > 0) {
+                draw_title_scrim(hdc, textStartX - scale_x(4), rect->top + scale_y(1),
+                                 titleScrimW, scale_y(22), fillCol);
+            }
+            if (rateScrimW > 0) {
+                draw_title_scrim(hdc, rateScrimX, rect->top + scale_y(1),
+                                 rateScrimW, scale_y(22), fillCol);
+            }
         }
-        int availW = textEndX - textStartX;
-        int nameWanted = szName.cx;
-        int nameVisible = nameWanted;
-        if (nameVisible > availW) nameVisible = (availW > 0) ? availW : 0;
-        int scrimW = nameVisible + szRate.cx + scale_x(6);
-        int maxW = textEndX - textStartX + scale_x(6);
-        if (scrimW > maxW) scrimW = maxW;
-        draw_title_scrim(hdc, textStartX - scale_x(3), rect->top + scale_y(1), scrimW, scale_y(24), fillCol);
+    }
+
+    // Rate badge, right-aligned; skipped when it would draw over the header.
+    if (szRate.cx > 0 && textEndX > minVisibleX + scale_x(20)) {
+        COLORREF rateCol = clip->isSelected ? RGB(255, 235, 170) : RGB(255, 210, 120);
+        SetTextColor(hdc, RGB((BYTE)(GetRValue(rateCol) * edgeAlpha),
+                              (BYTE)(GetGValue(rateCol) * edgeAlpha),
+                              (BYTE)(GetBValue(rateCol) * edgeAlpha)));
+        RECT rateRect = { textEndX - szRate.cx, rect->top + scale_y(2), textEndX, rect->top + scale_y(22) };
+        if (haveRateW)
+            DrawTextW(hdc, rateW, -1, &rateRect, DT_SINGLELINE | DT_RIGHT | DT_VCENTER | DT_NOPREFIX);
+        else
+            DrawTextA(hdc, rateBuf, -1, &rateRect, DT_SINGLELINE | DT_RIGHT | DT_VCENTER | DT_NOPREFIX);
+    }
+
+    // Sample name, left-aligned with ellipsis; yields space to the rate badge.
+    if (nameEndX > textStartX + scale_x(10)) {
+        SetTextColor(hdc, RGB((BYTE)(GetRValue(textBase) * edgeAlpha),
+                              (BYTE)(GetGValue(textBase) * edgeAlpha),
+                              (BYTE)(GetBValue(textBase) * edgeAlpha)));
+        RECT textRect = { textStartX, rect->top + scale_y(2), nameEndX, rect->top + scale_y(22) };
+        if (haveNameW)
+            DrawTextW(hdc, nameW, -1, &textRect, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+        else
+            DrawTextA(hdc, nameBuf, -1, &textRect, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
     }
 
     
@@ -2304,52 +2377,6 @@ static inline void draw_waveform_clip(HDC hdc, const Clip *clip, const RECT *rec
             const FadeCurveTpl* tpl = fade_mini_template_get(hdc, indW, indH, clip->fadeOutType, false);
             if (tpl) fade_blend_alpha(hdc, rect->right - indW - 2, rect->top + 2, indW, indH,
                                       fadeColor, CSEQ_FADE_INDICATOR_ALPHA * edgeAlpha, tpl->alpha);
-        }
-    }
-
-    
-    COLORREF textBase = clip->isSelected ? RGB(255, 255, 255)
-                       : (isMuted ? RGB(135, 145, 160) : RGB(215, 225, 240));
-    SetTextColor(hdc, RGB((BYTE)(GetRValue(textBase) * edgeAlpha),
-                          (BYTE)(GetGValue(textBase) * edgeAlpha),
-                          (BYTE)(GetBValue(textBase) * edgeAlpha)));
-
-    if (textEndX > textStartX + scale_x(10)) {
-        SIZE szRate = { 0, 0 };
-        wchar_t rateW[16];
-        bool haveRateW = false;
-        if (rateBuf[0]) {
-            haveRateW = (utf8_to_wide_buf(rateBuf, rateW, 16) > 0);
-            if (haveRateW)
-                GetTextExtentPoint32W(hdc, rateW, (int)wcslen(rateW), &szRate);
-            else
-                GetTextExtentPoint32A(hdc, rateBuf, (int)strlen(rateBuf), &szRate);
-        }
-
-        // Rate badge pinned to the right edge; the name yields the space.
-        if (szRate.cx > 0) {
-            COLORREF rateCol = clip->isSelected ? RGB(255, 235, 170) : RGB(255, 210, 120);
-            SetTextColor(hdc, RGB((BYTE)(GetRValue(rateCol) * edgeAlpha),
-                                  (BYTE)(GetGValue(rateCol) * edgeAlpha),
-                                  (BYTE)(GetBValue(rateCol) * edgeAlpha)));
-            RECT rateRect = { textEndX - szRate.cx, rect->top + scale_y(2), textEndX, rect->top + scale_y(22) };
-            if (haveRateW)
-                DrawTextW(hdc, rateW, -1, &rateRect, DT_SINGLELINE | DT_RIGHT | DT_VCENTER | DT_NOPREFIX);
-            else
-                DrawTextA(hdc, rateBuf, -1, &rateRect, DT_SINGLELINE | DT_RIGHT | DT_VCENTER | DT_NOPREFIX);
-            SetTextColor(hdc, RGB((BYTE)(GetRValue(textBase) * edgeAlpha),
-                                  (BYTE)(GetGValue(textBase) * edgeAlpha),
-                                  (BYTE)(GetBValue(textBase) * edgeAlpha)));
-        }
-
-        int nameEndX = textEndX - szRate.cx - ((szRate.cx > 0) ? scale_x(4) : 0);
-        if (nameEndX > textStartX) {
-            RECT textRect = { textStartX, rect->top + scale_y(2), nameEndX, rect->top + scale_y(22) };
-            wchar_t nameW[112];
-            if (utf8_to_wide_buf(nameBuf, nameW, 112) > 0)
-                DrawTextW(hdc, nameW, -1, &textRect, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-            else
-                DrawTextA(hdc, nameBuf, -1, &textRect, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
         }
     }
 
@@ -2695,7 +2722,7 @@ static inline bool timeline_redraw_dirty_bars(int w, int h) {
 
                     int stackCount = get_clip_stack_count(c);
                     RECT clipRect = { clipX1, clipY1, clipX2, clipY2 };
-                    draw_waveform_clip(g_cacheDC, c, &clipRect, false, stackCount);
+                    draw_waveform_clip(g_cacheDC, c, &clipRect, false, stackCount, w);
                 }
             }
 
@@ -2945,7 +2972,7 @@ static inline void update_timeline_cache(HDC hdc, int w, int h, const RECT *win)
         if (clipY2 <= clipWin->top || clipY1 >= clipWin->bottom) continue;
 
         RECT clipRect = {clipX1, clipY1, clipX2, clipY2};
-        draw_waveform_clip(g_cacheDC, c, &clipRect, isHovered, stackCount);
+        draw_waveform_clip(g_cacheDC, c, &clipRect, isHovered, stackCount, w);
 
 #ifdef CSEQ_PROFILE
         cseqClips++;
@@ -3217,6 +3244,15 @@ static inline void scroll_shift_timeline_cache(HDC hdc, int w, int h, int dx, in
         RECT fadeZone = { headerW, 0, min(w, headerW + kGutterFadeW), h };
         if (fadeZone.right > fadeZone.left)
             update_timeline_cache(hdc, w, h, &fadeZone);
+
+         
+        // Mirror gutter on the right edge: the right-pinned rate badge (and any
+        // clip edge) must stay clamped into view on every horizontal scroll,
+        // just like the left gutter keeps the sample name pinned. Without this
+        // the badge is only shifted by ScrollDC and drifts off the clamped edge.
+        RECT fadeZoneR = { max(headerW, w - scale_x(56)), 0, w, h };
+        if (fadeZoneR.right > fadeZoneR.left)
+            update_timeline_cache(hdc, w, h, &fadeZoneR);
     }
 
     if (dy != 0) {

@@ -2246,11 +2246,17 @@ static inline LRESULT cseq_main_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         case 'L':
             g_Seq.isLofi = !g_Seq.isLofi;
             break;
-        case VK_OEM_2:   // '/' opens the Media Explorer
+        case VK_OEM_2:   // '/' toggles the Media Explorer
             if (!(GetKeyState(VK_CONTROL) & 0x8000) &&
                 !(GetKeyState(VK_MENU) & 0x8000) &&
                 !(GetKeyState(VK_SHIFT) & 0x8000)) {
-                open_media_explorer(hwnd);
+                if (g_mediaHwnd && IsWindowVisible(g_mediaHwnd)) {
+                    // Already open: hide it (and mute the audition voice).
+                    ShowWindow(g_mediaHwnd, SW_HIDE);
+                    audition_stop();
+                } else {
+                    open_media_explorer(hwnd);
+                }
             }
             break;
         case 'G': {

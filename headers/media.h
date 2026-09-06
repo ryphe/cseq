@@ -1,5 +1,7 @@
 #pragma once
 #include <string.h>
+#include <stdlib.h>
+#include "scrollbar.h"
 
 // ---------------------------------------------------------------------------
 // Media Explorer — non-modal folder/file browser + audition previewer.
@@ -37,6 +39,15 @@ static inline HFONT media_font(void) {
     return s_font;
 }
 
+// Draw a UTF-8 string into a rect via DrawTextW (the app renders all user
+// text as wide; DrawTextA would misinterpret non-ASCII bytes as ANSI).
+static inline void media_draw_text_utf8(HDC hdc, const char* utf8, const RECT* rc, UINT flags) {
+    if (!utf8 || !utf8[0]) return;
+    wchar_t wbuf[MAX_PATH * 2];
+    if (utf8_to_wide_buf(utf8, wbuf, (int)(sizeof(wbuf) / sizeof(wbuf[0]))))
+        DrawTextW(hdc, wbuf, -1, (RECT*)rc, flags);
+}
+
 // Custom messages posted from workers back to the panel (UI thread).
 #define WM_APP_MEDIA_LIST    (WM_APP + 40)
 #define WM_APP_MEDIA_PREVIEW (WM_APP + 41)
@@ -72,6 +83,21 @@ static int              g_mediaSelDir  = -1;    // selected folder row (left)
 static int              g_mediaSelFile = -1;    // selected file row (right)
 static int              g_mediaFileScroll = 0;  // right pane scroll offset
 static int              g_mediaDirScroll  = 0;  // left pane scroll offset
+
+// Right-pane column sort state (click a header to change field / direction).
+typedef enum {
+    MEDIA_SORT_NAME = 0,
+    MEDIA_SORT_DURATION,
+    MEDIA_SORT_RATE,
+    MEDIA_SORT_CH,
+    MEDIA_SORT_FMT
+} MediaSortField;
+static MediaSortField   g_mediaSortField = MEDIA_SORT_NAME;
+static bool             g_mediaSortAsc    = true;
+
+// Right-pane custom scrollbar (styled like scrollbar.h). This is a separate
+// instance from the main timeline's g_sbState so the two never collide.
+static RefractSbState   g_mediaSb = { 0 };
 
 // Preview / audition state.
 static volatile LONG    g_mediaPreviewGen  = 0; // bumped on each request
@@ -333,6 +359,45 @@ static void media_scan_async(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Right-pane sorting. Only the file sub-range [dirCount, count) is reordered;
+// folders occupy [0, dirCount) and are never touched. Runs on the UI thread
+// under the list lock after a scan publishes, or on a header click.
+// ---------------------------------------------------------------------------
+static int media_cmp_files(const void* a, const void* b) {
+    const MediaEntry* ea = (const MediaEntry*)a;
+    const MediaEntry* eb = (const MediaEntry*)b;
+    int r = 0;
+    switch (g_mediaSortField) {
+        case MEDIA_SORT_DURATION:
+            r = (ea->durationSec < eb->durationSec) ? -1 : (ea->durationSec > eb->durationSec) ? 1 : 0;
+            break;
+        case MEDIA_SORT_RATE:
+            r = (ea->sampleRate < eb->sampleRate) ? -1 : (ea->sampleRate > eb->sampleRate) ? 1 : 0;
+            break;
+        case MEDIA_SORT_CH:
+            r = (ea->channels < eb->channels) ? -1 : (ea->channels > eb->channels) ? 1 : 0;
+            break;
+        case MEDIA_SORT_FMT:
+            r = _stricmp(ea->format, eb->format);
+            break;
+        case MEDIA_SORT_NAME:
+        default:
+            r = _stricmp(ea->name, eb->name);
+            break;
+    }
+    return g_mediaSortAsc ? r : -r;
+}
+
+static void media_sort_entries(void) {
+    EnterCriticalSection(&g_mediaListLock);
+    if (g_mediaFileCount > 1) {
+        qsort(g_mediaEntries + g_mediaDirCount, (size_t)g_mediaFileCount,
+              sizeof(MediaEntry), media_cmp_files);
+    }
+    LeaveCriticalSection(&g_mediaListLock);
+}
+
+// ---------------------------------------------------------------------------
 // Preview-decode worker: decodes the selected file into the audition voice's
 // inactive ping-pong buffer, builds the waveform peaks, and publishes it.
 // Single-flight (g_mediaPreviewBusy) with a generation check so stale decodes
@@ -590,6 +655,101 @@ static inline void media_compute_layout(const RECT* rc, MediaLayout* L) {
 }
 
 // ---------------------------------------------------------------------------
+// Right-pane custom scrollbar. The scroll value lives in g_mediaFileScroll
+// (in rows); the scrollbar works in pixels, so we convert on the way in/out.
+// ---------------------------------------------------------------------------
+static void media_update_sb(const RECT* rc) {
+    MediaLayout L;
+    media_compute_layout(rc, &L);
+    int contentPx = g_mediaFileCount * L.rowH;
+    int visiblePx = (L.rightPane.bottom - L.rightPane.top) - scale_y(20);
+    if (visiblePx < 0) visiblePx = 0;
+    g_mediaSb.totalContent = contentPx;
+    g_mediaSb.visibleHeight = visiblePx;
+    g_mediaSb.scrollPos = g_mediaFileScroll * L.rowH;
+    g_mediaSb.visible = contentPx > visiblePx;
+    int maxScroll = g_mediaFileCount - L.rightVisible;
+    if (maxScroll < 0) maxScroll = 0;
+    if (g_mediaFileScroll > maxScroll) g_mediaFileScroll = maxScroll;
+    if (g_mediaFileScroll < 0) g_mediaFileScroll = 0;
+}
+
+// Pane-specific geometry: the scrollbar hugs the right edge of the right pane,
+// spanning the file rows (below the header band).
+static bool media_sb_get_geom(const RECT* rc, RefractSbGeom* geo) {
+    memset(geo, 0, sizeof(*geo));
+    MediaLayout L;
+    media_compute_layout(rc, &L);
+    int trackTop = L.rightPane.top + scale_y(20);
+    int trackBottom = L.rightPane.bottom;
+    int trackLen = trackBottom - trackTop;
+    if (trackLen < cseq_sb_width()) return false;
+
+    geo->visible = g_mediaSb.visible;
+    geo->scrollMin = 0;
+    geo->scrollRange = g_mediaSb.totalContent;
+    geo->pagePx = g_mediaSb.visibleHeight;
+    geo->left = L.rightPane.right - cseq_sb_width();
+    geo->right = L.rightPane.right;
+    geo->trackTop = trackTop;
+    geo->trackBottom = trackBottom;
+
+    int total = g_mediaSb.totalContent;
+    int visible = g_mediaSb.visibleHeight;
+    if (total <= 0) return false;
+
+    int thumbLen = (total > visible)
+                   ? (int)((float)trackLen * ((float)visible / (float)total))
+                   : trackLen;
+    if (thumbLen < scale_y(28)) thumbLen = scale_y(28);
+    if (thumbLen > trackLen) thumbLen = trackLen;
+
+    float frac = (total > visible)
+                 ? (float)(g_mediaFileScroll * L.rowH) / (float)(total - visible)
+                 : 0.0f;
+    if (frac < 0.0f) frac = 0.0f;
+    if (frac > 1.0f) frac = 1.0f;
+
+    int thumbTop = trackTop + (int)(frac * (float)(trackLen - thumbLen));
+    geo->thumbTop = thumbTop;
+    geo->thumbBottom = thumbTop + thumbLen;
+    return true;
+}
+
+static void media_sb_draw(HDC hdc, const RECT* rc) {
+    if (!g_mediaSb.visible) return;
+    RefractSbGeom geo;
+    if (!media_sb_get_geom(rc, &geo) || !geo.visible) return;
+
+    RECT trackRt = { geo.left, geo.trackTop, geo.right, geo.trackBottom };
+    HBRUSH trackBrush = CreateSolidBrush(RGB(28, 33, 42));
+    FillRect(hdc, &trackRt, trackBrush);
+    DeleteObject(trackBrush);
+
+    bool hot = (g_mediaSb.dragging || g_mediaSb.hoverThumb);
+    COLORREF thumbCol = hot ? RGB(80, 100, 120) : RGB(60, 75, 90);
+    int marginX = scale_x(2);
+    int thumbX = geo.left + marginX;
+    int thumbW = (geo.right - geo.left) - marginX * 2;
+    int thumbY = geo.thumbTop;
+    int thumbH = geo.thumbBottom - geo.thumbTop;
+    if (thumbW > 0 && thumbH > 0) {
+        float radius = (float)thumbW * 0.5f;
+        cseq_sb_draw_aa_thumb(hdc, thumbX, thumbY, thumbW, thumbH, radius, thumbCol);
+    }
+}
+
+static void media_sb_commit(HWND hwnd, const RECT* rc) {
+    MediaLayout L;
+    media_compute_layout(rc, &L);
+    int maxScroll = g_mediaFileCount - L.rightVisible;
+    if (maxScroll < 0) maxScroll = 0;
+    if (g_mediaFileScroll > maxScroll) g_mediaFileScroll = maxScroll;
+    if (g_mediaFileScroll < 0) g_mediaFileScroll = 0;
+    InvalidateRect(hwnd, NULL, FALSE);
+}
+
+// ---------------------------------------------------------------------------
 // Seek the audition voice to the frame under the mouse and latch the UI
 // playhead there. Also records the seek timestamp so the draw pass won't
 // immediately re-anchor to a stale audio-thread frame (rubber-banding).
@@ -829,8 +989,8 @@ static void media_paint(HDC hdc, const RECT* rc) {
     // Current path (breadcrumb) in the title band.
     SetTextColor(memDC, RGB(95, 108, 126));
     RECT pathRc = { scale_x(150), 0, w - scale_x(8), scale_y(30) };
-    DrawTextA(memDC, g_mediaCurDir[0] ? g_mediaCurDir : "Quick Access", -1, &pathRc,
-              DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+    media_draw_text_utf8(memDC, g_mediaCurDir[0] ? g_mediaCurDir : "Quick Access", &pathRc,
+                         DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
     // Pane backgrounds + borders.
     HBRUSH paneBr = CreateSolidBrush(RGB(13, 16, 21));
@@ -849,11 +1009,12 @@ static void media_paint(HDC hdc, const RECT* rc) {
 
     // Column headers for the right pane.
     SetTextColor(memDC, RGB(120, 135, 155));
+    int sbW = cseq_sb_width();
     int colName = L.rightPane.left + scale_x(10);
-    int colDur  = L.rightPane.right - scale_x(220);
-    int colRate = L.rightPane.right - scale_x(130);
-    int colCh   = L.rightPane.right - scale_x(80);
-    int colFmt  = L.rightPane.right - scale_x(30);
+    int colDur  = L.rightPane.right - sbW - scale_x(220);
+    int colRate = L.rightPane.right - sbW - scale_x(150);
+    int colCh   = L.rightPane.right - sbW - scale_x(100);
+    int colFmt  = L.rightPane.right - sbW - scale_x(44);
     RECT hdrRc = { colName, L.rightPane.top + 2, colDur, L.rightPane.top + scale_y(18) };
     DrawTextA(memDC, "NAME", -1, &hdrRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     RECT h2 = { colDur, L.rightPane.top + 2, colRate, L.rightPane.top + scale_y(18) };
@@ -862,8 +1023,31 @@ static void media_paint(HDC hdc, const RECT* rc) {
     DrawTextA(memDC, "RATE", -1, &h3, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     RECT h4 = { colCh, L.rightPane.top + 2, colFmt, L.rightPane.top + scale_y(18) };
     DrawTextA(memDC, "CH", -1, &h4, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-    RECT h5 = { colFmt, L.rightPane.top + 2, L.rightPane.right - scale_x(6), L.rightPane.top + scale_y(18) };
+    RECT h5 = { colFmt, L.rightPane.top + 2, L.rightPane.right - sbW - scale_x(6), L.rightPane.top + scale_y(18) };
     DrawTextA(memDC, "FMT", -1, &h5, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    // Sort indicator on the active column: a small AA triangle (apex up for
+    // ascending, down for descending) drawn on the side of the column away
+    // from the header text so it never overlaps it.
+    {
+        int cx = 0;
+        int topY = L.rightPane.top + scale_y(10);
+        int halfW = scale_x(3);
+        int height = scale_y(5);
+        switch (g_mediaSortField) {
+            case MEDIA_SORT_NAME:
+                // Left-aligned text: put the caret at the column's right edge.
+                cx = colDur - scale_x(6);
+                break;
+            case MEDIA_SORT_DURATION: cx = colDur + scale_x(8); break;
+            case MEDIA_SORT_RATE:     cx = colRate + scale_x(8); break;
+            case MEDIA_SORT_CH:       cx = colCh + scale_x(8); break;
+            case MEDIA_SORT_FMT:      cx = colFmt - scale_x(12); break;
+        }
+        if (cx > 0) {
+            draw_aa_triangle(memDC, cx, topY, halfW, height, RGB(80, 210, 240), g_mediaSortAsc);
+        }
+    }
 
     // Snapshot the entry list under the lock.
     int count, dirCount;
@@ -900,7 +1084,8 @@ static void media_paint(HDC hdc, const RECT* rc) {
             SetTextColor(memDC, sel ? RGB(120, 235, 255) : RGB(170, 190, 210));
             char disp[MAX_PATH + 4];
             snprintf(disp, sizeof(disp), "> %s", e->name);
-            TextOutA(memDC, rRc.left + scale_x(8), rRc.top + scale_y(3), disp, (int)strlen(disp));
+            RECT dRc = { rRc.left + scale_x(8), rRc.top, rRc.right - scale_x(8), rRc.bottom };
+            media_draw_text_utf8(memDC, disp, &dRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
         }
     }
 
@@ -928,7 +1113,7 @@ static void media_paint(HDC hdc, const RECT* rc) {
 
             SetTextColor(memDC, sel ? RGB(120, 235, 255) : RGB(180, 195, 215));
             RECT nmRc = { colName, rRc.top, colDur - scale_x(6), rRc.bottom };
-            DrawTextA(memDC, e->name, -1, &nmRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            media_draw_text_utf8(memDC, e->name, &nmRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
             char buf[64];
             SetTextColor(memDC, RGB(130, 145, 165));
@@ -944,10 +1129,12 @@ static void media_paint(HDC hdc, const RECT* rc) {
                 snprintf(buf, sizeof(buf), "%d", e->channels);
                 RECT r3 = { colCh, rRc.top, colFmt, rRc.bottom };
                 DrawTextA(memDC, buf, -1, &r3, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                RECT r4 = { colFmt, rRc.top, L.rightPane.right - scale_x(6), rRc.bottom };
+                RECT r4 = { colFmt, rRc.top, L.rightPane.right - sbW - scale_x(6), rRc.bottom };
                 DrawTextA(memDC, e->format, -1, &r4, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             }
         }
+        // Custom scrollbar on the right edge of the file pane.
+        media_sb_draw(memDC, rc);
     }
 
     // Bottom bar: waveform + controls.
@@ -1059,10 +1246,13 @@ static LRESULT CALLBACK MediaExplorerWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         return 0;
     }
 
-    case WM_SIZE:
+    case WM_SIZE: {
         // Invalidate the entire client area so BitBlt is never clipped to a partial edge
+        RECT rc; GetClientRect(hwnd, &rc);
+        media_update_sb(&rc);
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
+    }
 
     case WM_GETMINMAXINFO: {
         // Prevent collapsing window into negative/unusable dimensions
@@ -1072,9 +1262,17 @@ static LRESULT CALLBACK MediaExplorerWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         return 0;
     }
 
-    case WM_APP_MEDIA_LIST:
+    case WM_APP_MEDIA_LIST: {
+        // A scan finished: apply the active sort to the new file list and
+        // refresh the scrollbar range.
+        media_sort_entries();
+        RECT rc; GetClientRect(hwnd, &rc);
+        media_update_sb(&rc);
+        InvalidateRect(hwnd, NULL, FALSE);
+        return 0;
+    }
     case WM_APP_MEDIA_PREVIEW: {
-        if (msg == WM_APP_MEDIA_PREVIEW) g_mediaPreviewReady = true;
+        g_mediaPreviewReady = true;
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
     }
@@ -1094,6 +1292,52 @@ static LRESULT CALLBACK MediaExplorerWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         SetFocus(hwnd);
         RECT rc; GetClientRect(hwnd, &rc);
         MediaLayout L; media_compute_layout(&rc, &L);
+
+        // Right-pane custom scrollbar: thumb drag or track page scroll.
+        {
+            RefractSbGeom sg;
+            if (media_sb_get_geom(&rc, &sg)) {
+                RefractSbPart part = cseq_sb_hit_test(&sg, mx, my);
+                if (part != CSEQ_SB_NONE) {
+                    if (part == CSEQ_SB_THUMB) {
+                        g_mediaSb.dragging = true;
+                        g_mediaSb.grabOffsetPx = my - sg.thumbTop;
+                        SetCapture(hwnd);
+                        InvalidateRect(hwnd, NULL, FALSE);
+                    } else {
+                        // Page by the visible row count.
+                        int rows = L.rightVisible;
+                        if (rows < 1) rows = 1;
+                        g_mediaFileScroll += (part == CSEQ_SB_TRACK_UP) ? -rows : rows;
+                        media_sb_commit(hwnd, &rc);
+                    }
+                    return 0;
+                }
+            }
+        }
+
+        // Column headers: click to sort by that field.
+        if (my >= L.rightPane.top && my <= L.rightPane.top + scale_y(20) &&
+            mx >= L.rightPane.left && mx <= L.rightPane.right) {
+            int sbW = cseq_sb_width();
+            int colDur  = L.rightPane.right - sbW - scale_x(220);
+            int colRate = L.rightPane.right - sbW - scale_x(150);
+            int colCh   = L.rightPane.right - sbW - scale_x(100);
+            int colFmt  = L.rightPane.right - sbW - scale_x(44);
+            MediaSortField f;
+            if (mx < colDur) f = MEDIA_SORT_NAME;
+            else if (mx < colRate) f = MEDIA_SORT_DURATION;
+            else if (mx < colCh) f = MEDIA_SORT_RATE;
+            else if (mx < colFmt) f = MEDIA_SORT_CH;
+            else f = MEDIA_SORT_FMT;
+            if (f == g_mediaSortField) g_mediaSortAsc = !g_mediaSortAsc;
+            else { g_mediaSortField = f; g_mediaSortAsc = true; }
+            g_mediaFileScroll = 0;
+            media_sort_entries();
+            media_update_sb(&rc);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
 
         // Waveform strip: click or begin scrub drag
         if (mx >= L.waveform.left && mx <= L.waveform.right &&
@@ -1204,6 +1448,31 @@ static LRESULT CALLBACK MediaExplorerWndProc(HWND hwnd, UINT msg, WPARAM wParam,
     case WM_MOUSEMOVE: {
         int mx = GET_X_LPARAM(lParam), my = GET_Y_LPARAM(lParam);
 
+        // Scrollbar thumb drag.
+        if (g_mediaSb.dragging) {
+            RECT rc; GetClientRect(hwnd, &rc);
+            RefractSbGeom geo;
+            if (!media_sb_get_geom(&rc, &geo)) {
+                g_mediaSb.dragging = false;
+                ReleaseCapture();
+                return 0;
+            }
+            int trackLen = geo.trackBottom - geo.trackTop;
+            int thumbLen = geo.thumbBottom - geo.thumbTop;
+            int denom = trackLen - thumbLen;
+            if (denom > 0) {
+                float frac = (float)(my - g_mediaSb.grabOffsetPx - geo.trackTop) / (float)denom;
+                if (frac < 0.0f) frac = 0.0f;
+                if (frac > 1.0f) frac = 1.0f;
+                int span = geo.scrollRange - geo.pagePx;
+                if (span < 0) span = 0;
+                MediaLayout L; media_compute_layout(&rc, &L);
+                g_mediaFileScroll = (int)(frac * (float)span / (float)L.rowH + 0.5f);
+                media_sb_commit(hwnd, &rc);
+            }
+            return 0;
+        }
+
         // Smooth scrubbing across waveform
         if (g_mediaWaveDragging) {
             RECT rc; GetClientRect(hwnd, &rc);
@@ -1251,6 +1520,12 @@ static LRESULT CALLBACK MediaExplorerWndProc(HWND hwnd, UINT msg, WPARAM wParam,
     }
 
     case WM_LBUTTONUP: {
+        if (g_mediaSb.dragging) {
+            g_mediaSb.dragging = false;
+            if (GetCapture() == hwnd) ReleaseCapture();
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
         if (g_mediaWaveDragging) {
             g_mediaWaveDragging = false;
             ReleaseCapture();
@@ -1286,6 +1561,14 @@ static LRESULT CALLBACK MediaExplorerWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         }
         return 0;
     }
+
+    case WM_CAPTURECHANGED:
+        if (g_mediaSb.dragging) {
+            g_mediaSb.dragging = false;
+            g_mediaSb.grabOffsetPx = 0;
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        return 0;
 
     case WM_RBUTTONDOWN: {
         // Right-click on a knob resets it to the factory default.
@@ -1339,11 +1622,7 @@ static LRESULT CALLBACK MediaExplorerWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         if (pt.x >= L.rightPane.left && pt.x <= L.rightPane.right) {
             int step = (zDelta > 0) ? -1 : 1;
             g_mediaFileScroll += step;
-            int files = g_mediaCount - g_mediaDirCount;
-            if (g_mediaFileScroll < 0) g_mediaFileScroll = 0;
-            if (g_mediaFileScroll > files - 1) g_mediaFileScroll = files - 1;
-            if (g_mediaFileScroll < 0) g_mediaFileScroll = 0;
-            InvalidateRect(hwnd, NULL, FALSE);
+            media_sb_commit(hwnd, &rc);
         } else if (pt.x >= L.leftPane.left && pt.x <= L.leftPane.right) {
             int step = (zDelta > 0) ? -1 : 1;
             g_mediaDirScroll += step;
@@ -1359,6 +1638,11 @@ static LRESULT CALLBACK MediaExplorerWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         int vk = (int)wParam;
         if (vk == VK_ESCAPE) {
             audition_stop();   // mute the audition voice when the panel is hidden
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        if (vk == VK_OEM_2) {  // '/' toggles the panel closed when focused
+            audition_stop();
             ShowWindow(hwnd, SW_HIDE);
             return 0;
         }
@@ -1486,6 +1770,12 @@ static inline void open_media_explorer(HWND parentHwnd) {
     // Keep the audition engine's output level in sync with the UI default.
     audition_set_volume(g_mediaVolume);
     audition_set_speed(g_mediaSpeed);
+
+    // Refresh the right-pane scrollbar range for the current client size.
+    {
+        RECT cr; GetClientRect(g_mediaHwnd, &cr);
+        media_update_sb(&cr);
+    }
 
     // Repaint timer drives the waveform scrub head while a preview plays.
     SetTimer(g_mediaHwnd, 1, 33, NULL);

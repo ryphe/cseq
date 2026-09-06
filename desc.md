@@ -1,4 +1,4 @@
-# cseq Source Tree Overview (1.3)
+# cseq Source Tree Overview (1.31)
 
 This document describes the purpose and responsibilities of each source file in the cseq project. The project is a **Unity build**. All `.c` files include `.h` files that contain full static implementations, and `main.c`'s include order defines the dependency graph.
 
@@ -139,6 +139,7 @@ This document describes the purpose and responsibilities of each source file in 
 - **Supersampled badge glyph**�the animated visualizer button (attractor ring / oscilloscope preview).
 - **Double-buffered GDI pipeline**�timeline cache (`g_cacheDC`), main back buffer (`g_mainBackDC`), final `BitBlt`.
 - **Hash tree** (`compute_timeline_param_hash`, `compute_timeline_content_hash`)�Merkle-style dirty-detection over the timeline grid.
+- **Clip title gutters** (`draw_waveform_clip`)�the sample name is left-pinned inside the track header and the playback-rate badge (`(1.25x)`) is right-pinned inside the visible canvas, so both stay in view when a clip is clipped on either edge. Each gets its own alpha scrim sized to its glyphs (merged only on narrow clips), leaving the waveform middle clean.
 - `render_ui`�the main `WM_PAINT` dispatcher. Draws the timeline cache, dynamic overlays (playhead, marquee, hover highlights, slice preview), bottom dock, and synth launcher buttons.
 
 ### `visualizer.h`
@@ -199,6 +200,7 @@ This document describes the purpose and responsibilities of each source file in 
 - **Confirm dialog**�project reset / quit / load confirmation.
 - **Keybinds dialog**�keyboard shortcut reference.
 - **Transient slicing dialog**�sensitivity slider + preview overlay.
+- **Master Volume dialog**�single 0–150% slider (default 100%) that live-applies to `g_Seq.masterVolume` as you drag/scroll/reset, updating the bottom-dock **MASTER** number indicator in real time; closing the popup by any path (ENTER/ESC/click-outside/X) keeps the applied value and marks the project modified.
 
 ### `media.h`
 **Media Explorer (non-modal file browser + audition preview).**

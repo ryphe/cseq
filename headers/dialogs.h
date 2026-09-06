@@ -10578,10 +10578,10 @@ static inline void show_track_context_menu(HWND hwnd, int trackIdx, int screenX,
     AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
 
     
+    AppendMenuA(hMenu, MF_STRING, ID_TRACK_FX_RACK, "FX Rack...");
     AppendMenuA(hMenu, MF_STRING, ID_TRACK_PAN_WIDTH, "Pan && Width...");
     AppendMenuA(hMenu, MF_STRING, ID_TRACK_EQ, "Parametric EQ...");
     AppendMenuA(hMenu, MF_STRING, ID_TRACK_FILTER, "Filter Plotter...");
-    AppendMenuA(hMenu, MF_STRING, ID_TRACK_FX_RACK, "FX Rack...");
     AppendMenuA(hMenu, MF_STRING, ID_TRACK_GRANULAR, "Granular Engine...");
     AppendMenuA(hMenu, MF_STRING, ID_TRACK_TRIGGER_PROB, "Trigger Probability...");
     AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
@@ -10767,13 +10767,14 @@ static inline void show_track_context_menu(HWND hwnd, int trackIdx, int screenX,
 }
 
 // --- Master Volume dialog (modeless popup slider) --------------------------
-// A single supersampled AA-capsule slider (0%..150%) with a preview value that
-// lives only in this popup; it is committed to g_Seq.masterVolume (under
-// seq_lock) on ENTER, and discarded on ESC / click-outside.
-// No seq_lock is taken during a drag: the slider only previews the value.
+// A single supersampled AA-capsule slider (0%..150%) that live-applies to
+// g_Seq.masterVolume (under seq_lock) as you drag, scroll, or reset, so the
+// bottom dock's MASTER number indicator updates in real time. Closing the
+// popup by any path (ENTER, ESC, click-outside, X) keeps the applied value and
+// marks the project modified.
 typedef struct {
     HWND   hwnd;
-    float  local;        // live preview value in [0.0, 1.5]
+    float  local;        // live value in [0.0, 1.5]
     bool   isDragging;
 } MasterVolWindowContext;
 static MasterVolWindowContext g_MasterVolWin = { 0 };
@@ -10800,7 +10801,29 @@ static inline void mastervol_commit(HWND hwnd) {
     DestroyWindow(hwnd);
 }
 
+// Live-apply the popup's value to the master volume and refresh the bottom
+// dock's MASTER button number indicator so the drag is visible immediately.
+// isModified is set on close (see mastervol_commit / mastervol_cancel), not on
+// every drag frame.
+static inline void mastervol_apply(void) {
+    float v = g_MasterVolWin.local;
+    if (v < MASTER_VOL_RANGE_LO) v = MASTER_VOL_RANGE_LO;
+    if (v > MASTER_VOL_RANGE_HI) v = MASTER_VOL_RANGE_HI;
+    seq_lock();
+    g_Seq.masterVolume = v;
+    seq_unlock();
+    if (g_hWnd) InvalidateRect(g_hWnd, NULL, FALSE);
+}
+
 static inline void mastervol_cancel(HWND hwnd) {
+    // The value is already live-applied on every interaction, so closing the
+    // popup by any path simply keeps it. Mark the project modified since the
+    // applied value is a real change.
+    seq_lock();
+    g_Seq.isModified = true;
+    seq_unlock();
+    update_window_title();
+    if (g_hWnd) InvalidateRect(g_hWnd, NULL, FALSE);
     DestroyWindow(hwnd);
 }
 
@@ -10830,6 +10853,7 @@ static LRESULT CALLBACK MasterVolWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             g_MasterVolWin.local = MASTER_VOL_RANGE_LO + norm * (MASTER_VOL_RANGE_HI - MASTER_VOL_RANGE_LO);
             g_MasterVolWin.isDragging = true;
             SetCapture(hwnd);
+            mastervol_apply();
             InvalidateRect(hwnd, NULL, FALSE);
         }
         return 0;
@@ -10846,6 +10870,7 @@ static LRESULT CALLBACK MasterVolWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 if (norm < 0.0f) norm = 0.0f;
                 if (norm > 1.0f) norm = 1.0f;
                 g_MasterVolWin.local = MASTER_VOL_RANGE_LO + norm * (MASTER_VOL_RANGE_HI - MASTER_VOL_RANGE_LO);
+                mastervol_apply();
                 InvalidateRect(hwnd, NULL, FALSE);
             }
         }
@@ -10858,6 +10883,7 @@ static LRESULT CALLBACK MasterVolWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         g_MasterVolWin.local += step;
         if (g_MasterVolWin.local < MASTER_VOL_RANGE_LO) g_MasterVolWin.local = MASTER_VOL_RANGE_LO;
         if (g_MasterVolWin.local > MASTER_VOL_RANGE_HI) g_MasterVolWin.local = MASTER_VOL_RANGE_HI;
+        mastervol_apply();
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
     }
@@ -10872,6 +10898,7 @@ static LRESULT CALLBACK MasterVolWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 
     case WM_RBUTTONDOWN: {
         g_MasterVolWin.local = 1.0f;   // right-click resets to 100%
+        mastervol_apply();
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
     }
