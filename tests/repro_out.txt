@@ -1,0 +1,11 @@
+[kind 1] start
+[kind 1] clip ok
+[kind 1] base=60
+[kind 1] dirty=1
+[kind 1] cache ok
+[kind 1] overlays ok
+[kind 1] overlays2 ok
+[kind 2] start
+[kind 2] clip ok
+[kind 2] base=60
+[kind 2] dirty=1
