@@ -20,7 +20,7 @@
 
 | Component | Description |
 | :--- | :--- |
-| **Audio Input** | `WAV`, `MP3`, `FLAC`, `OGG` (stb_vorbis), `M4A`, `AIFF`; SoundFont 2 (`.sf2`) banks |
+| **Audio Input** | `WAV`, `MP3`, `FLAC`, `OGG`, `M4A`, `AIFF`; SoundFont 2 (`.sf2`) banks |
 | **Audio Output** | `44.1 kHz` `Stereo` WASAPI mixdown; `WAV` export (16‑bit & 24‑bit TPDF dithered, 32‑bit float) |
 
 ---
