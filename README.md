@@ -62,9 +62,9 @@
 
 ### libraries
 
-- [miniaudio](https://github.com/mackron/miniaudio) (WASAPI audio I/O & file decoding)
-- [TinySoundFont](https://github.com/schellingb/TinySoundFont) (SoundFont `.sf2` parsing & pre-rendering)
-- [Airwindows](https://github.com/airwindows/airwindows) (`SmoothEQ3` parametric EQ)
-- [stb_vorbis](https://github.com/nothings/stb) (Ogg/Vorbis decoding)
-- [libogg](https://github.com/xiph/ogg) (Ogg/Vorbis decoding)
-- [libopus](https://github.com/xiph/opus) (Ogg/Opus decoding)
+- [miniaudio](https://github.com/mackron/miniaudio)
+- [TinySoundFont](https://github.com/schellingb/TinySoundFont)
+- [Airwindows](https://github.com/airwindows/airwindows)
+- [stb_vorbis](https://github.com/nothings/stb)
+- [libogg](https://github.com/xiph/ogg)
+- [libopus](https://github.com/xiph/opus)
