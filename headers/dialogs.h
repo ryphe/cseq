@@ -575,7 +575,7 @@ static const KeybindRow kKeybindList[] = {
     { "M",                      "Toggle Mute on clip / track" },
     { "Shift + S",              "Toggle Solo on hovered track" },
     { "Shift + M",              "Insert 1/4-bar MIDI clip" },
-    { "Shift + < / >",          "Change Bar Count (+/- 4)" },
+    { "Shift + < / >",          "Change bar count (+/- 4)" },
     { "Alt + < / >",            "Pan timeline 8 bars (left or right)" },
     { "+  /  -",                "BPM adjust (+/- 1)" },
     { "[  /  ]",                "Swing adjust (+/- 5%)" },

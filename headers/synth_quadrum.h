@@ -537,8 +537,9 @@ static int quadrum_render(const QuadrumParams* p, float* out_buf, int max_len) {
         }
 
         double osc_gain = 1.0 - smoothed_mix;
+        double clap_boost = is_clap ? 1.25 : 1.0; /* louder clap flam/tail, ~+2 dB */
         double combined = ((osc * tonal_amp_env * osc_gain)
-                        + (filtered_noise * noise_env * smoothed_mix)
+                        + (filtered_noise * noise_env * smoothed_mix * clap_boost)
                         + click_val) * master_amp;
 
         /* 9. Master Filtering & Saturation */

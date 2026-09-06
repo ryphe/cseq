@@ -1,4 +1,4 @@
-# cseq Source Tree Overview (1.31)
+# cseq Source Tree Overview (1.32)
 
 This document describes the purpose and responsibilities of each source file in the cseq project. The project is a **Unity build**. All `.c` files include `.h` files that contain full static implementations, and `main.c`'s include order defines the dependency graph.
 
@@ -111,12 +111,13 @@ This document describes the purpose and responsibilities of each source file in 
 
 ### `synth.h`
 **Integration layer** connecting the synth engines to the timeline and UI:
-- `SynthHaloState` & `SynthQuadrumState`�per-clip runtime state arrays (`g_ClipHalo`, `g_ClipQuadrum`).
-- `synth_state_init_clip`�initializes synth state for a clip (allocates Quadrum transient buffers off-thread).
-- `synth_quadrum_rerender_clip` / `synth_quadrum_rerender_voice`�off-thread transient re-render on parameter edits.
-- `synth_clip_process_frames`�dispatches per-frame rendering to Halo or Quadrum engines; Quadrum triggers scale the one-shot transient by the note's velocity (`midi_velocity_gain`) in timeline playback and in the piano-roll audition preview.
-- `synth_editor_process_preview`�audition rendering for the piano roll.
-- `synth_editor_has_ringing`�keeps audio callback alive during release tails.
+- `SynthHaloState` & `SynthQuadrumState` per-clip runtime state arrays (`g_ClipHalo`, `g_ClipQuadrum`).
+- `synth_state_init_clip` initializes synth state for a clip (allocates Quadrum transient buffers **off-thread** — never call it under `seq_lock`; it renders ~30-90 ms and would starve the audio callback into crackling).
+- `synth_state_shift_left` compacts synth state after a clip delete. **Ownership rules:** transient buffers move *with* their clip (free only the removed slot, never the tail); cached `HaloVoice*` pointers are re-anchored via `synth_halo_remap_copied_state` so note-off/stealing never touches another clip's engine. Violating this double-frees transients and crashes playback with a dangling-buffer AV.
+- `synth_quadrum_rerender_clip` / `synth_quadrum_rerender_voice` off-thread transient re-render on parameter edits (staging-buffer + brief locked swap).
+- `synth_clip_process_frames` dispatches per-frame rendering to Halo or Quadrum engines; Quadrum triggers scale the one-shot transient by the note's velocity (`midi_velocity_gain`) in timeline playback and in the piano-roll audition preview.
+- `synth_editor_process_preview` audition rendering for the piano roll.
+- `synth_editor_has_ringing` keeps audio callback alive during release tails.
 - Snapshot support (`synth_snapshot_take`, `synth_snapshot_free`) for export isolation.
 
 ### `synthui.h`

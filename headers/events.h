@@ -1793,6 +1793,12 @@ static inline LRESULT cseq_main_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     seq_lock();
                     int originalCount = g_Seq.clipCount;
                     int newLeadIdx = g_Seq.draggedClipIndex;
+                    // Clones whose synth runtime state is (re)built after the
+                    // lock: a Quadrum clone needs a full 8-voice transient
+                    // render (~30-90 ms) that must never run under seq_lock
+                    // (it starves the audio callback -> underrun crackle).
+                    int synthCloneIdx[MAX_CLIPS];
+                    int synthCloneCount = 0;
                     for (int i = 0; i < originalCount; ++i) {
                         if (g_Seq.clips[i].isSelected && g_Seq.clipCount < MAX_CLIPS) {
                             int cloneIdx = g_Seq.clipCount++;
@@ -1806,12 +1812,17 @@ static inline LRESULT cseq_main_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                             g_ClipGran[cloneIdx].ownLoaded = false;
                             memset(g_ClipGran[cloneIdx].grains, 0, sizeof(g_ClipGran[cloneIdx].grains));
 
-                            // A duplicated Quadrum clip has no rendered transient
-                            // buffers yet (g_ClipQuadrum isn't part of the Clip
-                            // struct). Re-initialize its synth state so the new
-                            // clip triggers notes immediately.
-                            if (g_Seq.clips[cloneIdx].clipKind == CLIP_KIND_QUADRUM) {
-                                synth_state_init_clip(cloneIdx);
+                            uint8_t kind = g_Seq.clips[cloneIdx].clipKind;
+                            if (kind == CLIP_KIND_QUADRUM || kind == CLIP_KIND_HALO) {
+                                // Zero the clone's synth runtime state under the
+                                // lock so the audio thread never observes stale
+                                // state: ringing Quadrum transients or cached
+                                // Halo voice pointers owned by a previous
+                                // occupant of this slot (wrong-clip voice
+                                // release/stealing mid-playback).
+                                memset(&g_ClipHalo[cloneIdx], 0, sizeof(SynthHaloState));
+                                memset(&g_ClipQuadrum[cloneIdx], 0, sizeof(SynthQuadrumState));
+                                synthCloneIdx[synthCloneCount++] = cloneIdx;
                             }
 
                             if (i == g_Seq.draggedClipIndex) newLeadIdx = cloneIdx;
@@ -1820,6 +1831,18 @@ static inline LRESULT cseq_main_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     g_Seq.draggedClipIndex = newLeadIdx;
                     g_Seq.isCtrlDuplicating = false;
                     seq_unlock();
+
+                    // Render cloned Quadrum transients OFF the lock. A zeroed
+                    // clone is inert to the audio thread (mix_quadrum_active
+                    // and the trigger path guard !buf / len <= 0), and
+                    // synth_state_init_clip publishes each buffer via its own
+                    // brief seq_lock swap, so playback never blocks here and
+                    // never sees a half-built transient.
+                    if (synthCloneCount > 0) {
+                        for (int k = 0; k < synthCloneCount; ++k) {
+                            synth_state_init_clip(synthCloneIdx[k]);
+                        }
+                    }
                     cseq_clip_structure_changed();
                 }
             }

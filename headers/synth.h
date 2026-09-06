@@ -238,6 +238,38 @@ static inline void synth_state_free_clip(int clipIdx) {
     }
 }
 
+// Re-anchor the cached voice pointers of a copied SynthHaloState. Struct
+// copies carry raw addresses: a slot-moved or duplicated halo clip would
+// otherwise keep releasing/stealing voices in ANOTHER clip's engine. Offsets
+// are computed against the source state's own vm.voices array and rewritten
+// against the copy's. Caller holds the seq lock.
+static inline void synth_halo_remap_copied_state(SynthHaloState* dst, const SynthHaloState* src) {
+    const HaloVoice* base     = src->vm.voices;
+    HaloVoice*       dstBase  = dst->vm.voices;
+    for (int i = 0; i < MIDI_MAX_NOTES; ++i) {
+        if (src->noteVoice[i]) {
+            ptrdiff_t off = src->noteVoice[i] - base;
+            dst->noteVoice[i] = (off >= 0 && off < HALO_MAX_VOICES) ? &dstBase[off] : NULL;
+        } else {
+            dst->noteVoice[i] = NULL;
+        }
+        if (src->auditionNoteVoice[i]) {
+            ptrdiff_t off = src->auditionNoteVoice[i] - base;
+            dst->auditionNoteVoice[i] = (off >= 0 && off < HALO_MAX_VOICES) ? &dstBase[off] : NULL;
+        } else {
+            dst->auditionNoteVoice[i] = NULL;
+        }
+    }
+    for (int i = 0; i < 8; ++i) {
+        if (src->auditionKeyVoice[i]) {
+            ptrdiff_t off = src->auditionKeyVoice[i] - base;
+            dst->auditionKeyVoice[i] = (off >= 0 && off < HALO_MAX_VOICES) ? &dstBase[off] : NULL;
+        } else {
+            dst->auditionKeyVoice[i] = NULL;
+        }
+    }
+}
+
 // Silence all synth voices/transients on transport stop (mirrors
 // granular_stop_all). Called off the audio thread when playback halts so
 // ringing Halo voices and playing Quadrum transients don't keep sounding and
@@ -365,15 +397,28 @@ static inline void synth_state_reset_all(void) {
 // Shift synth state left by one slot at `del` when a clip is removed and the
 // clip array is compacted (keeps g_ClipHalo/g_ClipQuadrum in lockstep with
 // g_Seq.clips, exactly like g_ClipGran). Caller holds the seq lock.
+//
+// Buffer-ownership: transient buffers move WITH their clip. The removed clip's
+// buffers (slot del) are freed BEFORE any struct copy aliases pointers;
+// surviving structs are copied down intact, and the vacated tail is cleared
+// WITHOUT freeing (its pointers alias the clip just moved into clipCount-2,
+// which still owns them). The old free-per-iteration + tail-free pattern left
+// every moved slot referencing a block the next iteration destroyed: surviving
+// Quadrum clips ended up with dangling transients (and the same block was
+// freed twice). With ringing voices (playing[v] == true) the very next audio
+// callback dereferenced the freed buffer in mix_quadrum_active -> crash.
 static inline void synth_state_shift_left(int del, int clipCount) {
     if (del < 0 || clipCount <= 0) return;
+    synth_state_free_clip(del);
     for (int j = del; j < clipCount - 1; ++j) {
-        synth_state_free_clip(j);                      // free the slot we overwrite
         g_ClipHalo[j]    = g_ClipHalo[j + 1];
         g_ClipQuadrum[j] = g_ClipQuadrum[j + 1];
+        // The copy's noteVoice/auditionKeyVoice pointers still target the OLD
+        // slot's inline vm.voices (which now holds a different clip); re-anchor
+        // them so voice release/stealing never touches another clip's engine.
+        synth_halo_remap_copied_state(&g_ClipHalo[j], &g_ClipHalo[j + 1]);
     }
-    // Clear the vacated tail slot.
-    synth_state_free_clip(clipCount - 1);
+    // Clear the vacated tail without freeing its (now aliased) buffers.
     memset(&g_ClipHalo[clipCount - 1], 0, sizeof(SynthHaloState));
     memset(&g_ClipQuadrum[clipCount - 1], 0, sizeof(SynthQuadrumState));
     halo_recount_active_voices();

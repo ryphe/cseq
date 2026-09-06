@@ -1,4 +1,4 @@
-# cseq — Architecture & Design Guide (1.31)
+# cseq — Architecture & Design Guide (1.32)
 
 This is the authoritative reference for how the engine is built, how it threads, how memory is owned, and how to extend it without breaking real-time safety.
 
@@ -326,6 +326,39 @@ primitives** and **single-producer/single-consumer rings**:
   audition preview.
 - **Granular:** a pool of `GRAN_MAX_GRAINS` grains; a spawn claims an inactive
   grain, or **chokes** the oldest grain (highest `phase`) when full.
+
+> **Per-clip synth runtime state (`g_ClipHalo` / `g_ClipQuadrum`) — hard rules**
+> (these make the "duplicate a Quadrum clip → crash" class of bug impossible):
+>
+> 1. **Transient buffers move WITH their clip.** On compaction
+>    (`synth_state_shift_left`), free only the *removed* slot, copy survivors
+>    down intact, and clear the vacated tail **without** freeing its aliased
+>    pointers. Never free a slot you are about to overwrite, and never free the
+>    tail after a move — both double-free the same block and leave every
+>    shifted clip dangling; the next audio chunk dereferences the freed
+>    transient in `mix_quadrum_active` (AV crash).
+> 2. **Cached voice pointers must be re-anchored on copy.** `SynthHaloState`
+>    stores raw `HaloVoice*` handles (`noteVoice[]`, `auditionKeyVoice[]`,
+>    `auditionNoteVoice[]`). After any struct copy (slot move, duplicate,
+>    snapshot), remap them by offset against the source's own `vm.voices`
+>    array (`synth_halo_remap_copied_state`), or note-off/stealing will release
+>    voices inside *another* clip's engine.
+> 3. **Never run `quadrum_render` under `seq_lock`.** A full 8-voice render is
+>    ~30–90 ms — the audio callback (which holds the lock ~23 ms/chunk) will
+>    underrun (crackle). Render with no lock held into the staging buffer and
+>    publish via the brief locked pointer swap inside `synth_state_init_clip`
+>    (`synth_quadrum_rerender_*`). The audio thread never re-renders, only
+>    plays back `buf[v]` when `playing[v] && buf[v] && len[v] > 0`.
+> 4. **A new clip slot must be inert until its state is built.** Zero the
+>    clone's `g_ClipHalo`/`g_ClipQuadrum` slot under `seq_lock` at creation
+>    time (so the audio thread never observes a previous occupant's ringing
+>    voices / stale pointers), then call `synth_state_init_clip` **off** the
+>    lock — a zeroed state is a safe no-op in both the trigger path and
+>    `mix_quadrum_active`.
+> 5. **`synth_state_free_clip` is the only free site.** All teardown (clip
+>    delete, project reset, snapshot free) funnels through it — it nulls the
+>    pointers and flags (`playing=false`) under the seq lock so the audio
+>    thread cannot race a `free()`.
 
 ### 3.3 Lifetime rules — preventing use-after-free
 
