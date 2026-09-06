@@ -66,3 +66,5 @@
 - [TinySoundFont](https://github.com/schellingb/TinySoundFont) (SoundFont `.sf2` parsing & pre-rendering)
 - [Airwindows](https://github.com/airwindows/airwindows) (`SmoothEQ3` parametric EQ)
 - [stb_vorbis](https://github.com/nothings/stb) (Ogg/Vorbis decoding)
+- [libogg](https://github.com/xiph/ogg) (Ogg/Vorbis decoding)
+- [libopus](https://github.com/xiph/opus) (Ogg/Opus decoding)
