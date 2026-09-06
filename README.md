@@ -5,7 +5,7 @@
 <h2 align="center">cseq</h2>
 
 <p align="center">
-  multitrack sampler sequencer workstation (C99/Win32)
+  fast multitrack sampler sequencer (C99/Win32)
 </p>
 
 ---
