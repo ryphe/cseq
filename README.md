@@ -68,4 +68,4 @@
 - [stb_vorbis](https://github.com/nothings/stb)
 - [libogg](https://github.com/xiph/ogg)
 - [libopus](https://github.com/xiph/opus)
-- [Airwindows](https://github.com/airwindows/airwindows) -> `SmoothEQ3`
+- [Airwindows](https://github.com/airwindows/airwindows) for `SmoothEQ3`
