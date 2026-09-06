@@ -1,4 +1,4 @@
-# cseq Source Tree Overview (1.33)
+# cseq Source Tree Overview (1.35)
 
 This document describes the purpose and responsibilities of each source file in the cseq project. The project is a **Unity build**. All `.c` files include `.h` files that contain full static implementations, and `main.c`'s include order defines the dependency graph.
 
@@ -208,8 +208,8 @@ This document describes the purpose and responsibilities of each source file in 
 
 ### `media.h`
 **Media Explorer (non-modal file browser + audition preview).**
-- Dual-pane directory browser (left: folders, right: audio files).
-- Background dir-scan worker (`media_scan_thread_proc`)�enumerates files and reads audio metadata (duration, sample rate, channels) with miniaudio.
+- Dual-pane directory browser (left: folders, right: audio files), each pane with its own custom scrollbar (`media_sb_*` on the right file pane, `media_dir_sb_*` on the left directory pane) — styled like `scrollbar.h`, with thumb drag / track page / mouse-wheel scrolling.
+- Background dir-scan worker (`media_scan_thread_proc`)�enumerates files and reads audio metadata (duration, sample rate, channels). miniaudio is tried first; when it lacks a backend (ogg/opus/m4a/aac/wma) the scan falls back to the same decoders the preview path uses (stb_vorbis for OGG, the vendored opusfile stack for OPUS, Media Foundation for M4A/AAC/WMA) so every listed format gets its metadata displayed.
 - Background preview decode worker (`media_preview_thread_proc`)�decodes selected file into the audition ping-pong buffer and builds waveform peaks. `media_decode_all` runs the full fallback chain (miniaudio � Media Foundation � stb_vorbis � Opus), so every listed format (wav/aiff/aif/flac/mp3/ogg/opus/m4a/aac/wma) previews.
 - **Audition voice integration** (`headers/audition.h`)�real-time preview playback mixed into the master bus.
 - Drag-and-drop from explorer to timeline (`media_import_at_point`).

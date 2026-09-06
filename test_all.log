@@ -1,8 +1,8 @@
-cseq test_all — started Sun 06 Sep 2026 16:04:53.86
+cseq test_all — started Sun 06 Sep 2026 16:36:04.72
 ====================================================================
 cseq test_all
-root : C:\Users\aorav\1.34\cseq\
-log  : C:\Users\aorav\1.34\cseq\test_all_202606Sep_1604.log
+root : C:\Users\aorav\1.35\cseq\
+log  : C:\Users\aorav\1.35\cseq\test_all_202606Sep_1636.log
 
 == [1/6] Toolchain setup ==
 MSVC environment ready.
@@ -32,21 +32,21 @@ adsr_verify.c
   -> adsr_verify: compiled ok
   compiling dsp_verify...
 dsp_verify.c
-C:\Users\aorav\1.34\cseq\headers\ui.h(1911): warning C4013: 'sfont_is_loaded' undefined; assuming extern returning int
-C:\Users\aorav\1.34\cseq\headers\ui.h(1914): warning C4013: 'sfont_name' undefined; assuming extern returning int
-C:\Users\aorav\1.34\cseq\headers\ui.h(1915): warning C4013: 'sfont_preset_name' undefined; assuming extern returning int
-C:\Users\aorav\1.34\cseq\headers\ui.h(1915): warning C4013: 'sfont_active_preset_slot' undefined; assuming extern returning int
-C:\Users\aorav\1.34\cseq\headers\ui.h(1914): warning C4047: 'initializing': 'const char *' differs in levels of indirection from 'int'
-C:\Users\aorav\1.34\cseq\headers\ui.h(1915): warning C4047: 'initializing': 'const char *' differs in levels of indirection from 'int'
+C:\Users\aorav\1.35\cseq\headers\ui.h(1911): warning C4013: 'sfont_is_loaded' undefined; assuming extern returning int
+C:\Users\aorav\1.35\cseq\headers\ui.h(1914): warning C4013: 'sfont_name' undefined; assuming extern returning int
+C:\Users\aorav\1.35\cseq\headers\ui.h(1915): warning C4013: 'sfont_preset_name' undefined; assuming extern returning int
+C:\Users\aorav\1.35\cseq\headers\ui.h(1915): warning C4013: 'sfont_active_preset_slot' undefined; assuming extern returning int
+C:\Users\aorav\1.35\cseq\headers\ui.h(1914): warning C4047: 'initializing': 'const char *' differs in levels of indirection from 'int'
+C:\Users\aorav\1.35\cseq\headers\ui.h(1915): warning C4047: 'initializing': 'const char *' differs in levels of indirection from 'int'
   -> dsp_verify: compiled ok
   compiling reverse_verify...
 reverse_verify.c
-C:\Users\aorav\1.34\cseq\headers\ui.h(1911): warning C4013: 'sfont_is_loaded' undefined; assuming extern returning int
-C:\Users\aorav\1.34\cseq\headers\ui.h(1914): warning C4013: 'sfont_name' undefined; assuming extern returning int
-C:\Users\aorav\1.34\cseq\headers\ui.h(1915): warning C4013: 'sfont_preset_name' undefined; assuming extern returning int
-C:\Users\aorav\1.34\cseq\headers\ui.h(1915): warning C4013: 'sfont_active_preset_slot' undefined; assuming extern returning int
-C:\Users\aorav\1.34\cseq\headers\ui.h(1914): warning C4047: 'initializing': 'const char *' differs in levels of indirection from 'int'
-C:\Users\aorav\1.34\cseq\headers\ui.h(1915): warning C4047: 'initializing': 'const char *' differs in levels of indirection from 'int'
+C:\Users\aorav\1.35\cseq\headers\ui.h(1911): warning C4013: 'sfont_is_loaded' undefined; assuming extern returning int
+C:\Users\aorav\1.35\cseq\headers\ui.h(1914): warning C4013: 'sfont_name' undefined; assuming extern returning int
+C:\Users\aorav\1.35\cseq\headers\ui.h(1915): warning C4013: 'sfont_preset_name' undefined; assuming extern returning int
+C:\Users\aorav\1.35\cseq\headers\ui.h(1915): warning C4013: 'sfont_active_preset_slot' undefined; assuming extern returning int
+C:\Users\aorav\1.35\cseq\headers\ui.h(1914): warning C4047: 'initializing': 'const char *' differs in levels of indirection from 'int'
+C:\Users\aorav\1.35\cseq\headers\ui.h(1915): warning C4047: 'initializing': 'const char *' differs in levels of indirection from 'int'
   -> reverse_verify: compiled ok
   compiling repro_halo...
 repro_halo.c
@@ -56,12 +56,12 @@ fade_wedge_verify.c
   -> fade_wedge_verify: compiled ok
   compiling sidechain_verify...
 sidechain_verify.c
-C:\Users\aorav\1.34\cseq\headers\ui.h(1911): warning C4013: 'sfont_is_loaded' undefined; assuming extern returning int
-C:\Users\aorav\1.34\cseq\headers\ui.h(1914): warning C4013: 'sfont_name' undefined; assuming extern returning int
-C:\Users\aorav\1.34\cseq\headers\ui.h(1915): warning C4013: 'sfont_preset_name' undefined; assuming extern returning int
-C:\Users\aorav\1.34\cseq\headers\ui.h(1915): warning C4013: 'sfont_active_preset_slot' undefined; assuming extern returning int
-C:\Users\aorav\1.34\cseq\headers\ui.h(1914): warning C4047: 'initializing': 'const char *' differs in levels of indirection from 'int'
-C:\Users\aorav\1.34\cseq\headers\ui.h(1915): warning C4047: 'initializing': 'const char *' differs in levels of indirection from 'int'
+C:\Users\aorav\1.35\cseq\headers\ui.h(1911): warning C4013: 'sfont_is_loaded' undefined; assuming extern returning int
+C:\Users\aorav\1.35\cseq\headers\ui.h(1914): warning C4013: 'sfont_name' undefined; assuming extern returning int
+C:\Users\aorav\1.35\cseq\headers\ui.h(1915): warning C4013: 'sfont_preset_name' undefined; assuming extern returning int
+C:\Users\aorav\1.35\cseq\headers\ui.h(1915): warning C4013: 'sfont_active_preset_slot' undefined; assuming extern returning int
+C:\Users\aorav\1.35\cseq\headers\ui.h(1914): warning C4047: 'initializing': 'const char *' differs in levels of indirection from 'int'
+C:\Users\aorav\1.35\cseq\headers\ui.h(1915): warning C4047: 'initializing': 'const char *' differs in levels of indirection from 'int'
   -> sidechain_verify: compiled ok
 
 == [4/6] Run harnesses ==

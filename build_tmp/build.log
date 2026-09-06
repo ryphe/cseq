@@ -1,0 +1,14 @@
+=======================================================
+building cseq
+=======================================================
+[INFO] Compiling resources from cseq.rc...
+[INFO] Resource compiled successfully: 
+[INFO] Compiling C source files...
+main.c
+eq.c
+vorbis.c
+miniaudio.c
+[INFO] Compiling vendored opus decoder stack (libogg + libopus + libopusfile)...
+Generating code
+Finished generating code
+[SUCCESS] Build complete: cseq.exe

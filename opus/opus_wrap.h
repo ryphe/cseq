@@ -14,6 +14,10 @@ typedef struct OpusWrapDecoder {
     uint64_t  frames;    // Total decoded frames at SAMPLE_RATE
     void*     internal;  // Internal OggOpusFile pointer
     void*     file;      // Internal FILE* handle (if file-backed)
+    // Metadata (populated by opus_open / opus_open_memory).
+    int       sample_rate;      // Original stream sample rate (OpusHead input_sample_rate)
+    int       channels;         // Channel count of the first link
+    uint64_t  total_frames_48k; // Total PCM frames at the 48 kHz decode rate
 } OpusWrapDecoder;
 
 #ifdef __cplusplus

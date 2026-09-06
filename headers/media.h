@@ -98,6 +98,9 @@ static bool             g_mediaSortAsc    = true;
 // Right-pane custom scrollbar (styled like scrollbar.h). This is a separate
 // instance from the main timeline's g_sbState so the two never collide.
 static RefractSbState   g_mediaSb = { 0 };
+// Left directory-pane scrollbar (separate instance so it never collides with
+// the right-pane scrollbar or the main timeline's).
+static RefractSbState   g_mediaDirSb = { 0 };
 
 // Preview / audition state.
 static volatile LONG    g_mediaPreviewGen  = 0; // bumped on each request
@@ -395,6 +398,62 @@ static void media_navigate_up(void) {
     media_scan_async();
 }
 
+// Read duration/sample-rate/channels for a Media Foundation decodable file
+// (m4a / aac / wma). Runs on the scan worker, never the UI thread. Returns
+// true if any metadata was obtained. Uses the same C-style MF COM pattern as
+// media_decode_all's Media Foundation branch.
+static bool media_read_meta_mf(const char* path, double* durSec, int* rate, int* ch) {
+    WCHAR wpath[MAX_PATH * 2];
+    if (utf8_to_wide_buf(path, wpath, (int)(sizeof(wpath) / sizeof(wpath[0]))) <= 0)
+        return false;
+
+    HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE);
+    BOOL needUninit = SUCCEEDED(hr);
+
+    IMFSourceReader* pReader = NULL;
+    hr = MFCreateSourceReaderFromURL(wpath, NULL, &pReader);
+    if (FAILED(hr) || !pReader) {
+        if (needUninit) CoUninitialize();
+        return false;
+    }
+
+    bool got = false;
+
+    // Native (decoded) audio type carries the sample rate / channel count.
+    IMFMediaType* pType = NULL;
+    hr = pReader->lpVtbl->GetNativeMediaType(pReader,
+                                             (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM,
+                                             0, &pType);
+    if (SUCCEEDED(hr) && pType) {
+        UINT32 u32 = 0;
+        if (SUCCEEDED(pType->lpVtbl->GetUINT32(pType, &MF_MT_AUDIO_SAMPLES_PER_SECOND, &u32)) && u32 > 0) {
+            *rate = (int)u32;
+            got = true;
+        }
+        if (SUCCEEDED(pType->lpVtbl->GetUINT32(pType, &MF_MT_AUDIO_NUM_CHANNELS, &u32)) && u32 > 0) {
+            *ch = (int)u32;
+            got = true;
+        }
+        pType->lpVtbl->Release(pType);
+    }
+
+    // Presentation duration is in 100 ns units on the media source.
+    PROPVARIANT var;
+    PropVariantInit(&var);
+    hr = pReader->lpVtbl->GetPresentationAttribute(pReader,
+                                                   (DWORD)MF_SOURCE_READER_MEDIASOURCE,
+                                                   &MF_PD_DURATION, &var);
+    if (SUCCEEDED(hr) && var.vt == VT_UI8 && var.uhVal.QuadPart > 0) {
+        *durSec = (double)var.uhVal.QuadPart / 10000000.0;
+        got = true;
+    }
+    PropVariantClear(&var);
+
+    pReader->lpVtbl->Release(pReader);
+    if (needUninit) CoUninitialize();
+    return got;
+}
+
 // ---------------------------------------------------------------------------
 // Directory-scan worker: enumerates the current folder on a background thread,
 // publishing the entry list incrementally so the UI never blocks.
@@ -509,6 +568,43 @@ static DWORD WINAPI media_scan_thread_proc(LPVOID param) {
                 e->channels   = (int)dec.outputChannels;
                 e->metaReady  = true;
                 ma_decoder_uninit(&dec);
+            } else if (!e->metaReady) {
+                // miniaudio lacks backends for some formats (ogg / opus / m4a /
+                // aac / wma); fall back to the same decoders the preview path
+                // uses so every listed format gets its metadata displayed.
+                const char* dot = strrchr(e->name, '.');
+                if (dot && _stricmp(dot, ".ogg") == 0) {
+                    OggDecoder gd;
+                    memset(&gd, 0, sizeof(gd));
+                    if (ogg_open(&gd, e->path)) {
+                        e->sampleRate = gd.vorb_sample_rate;
+                        e->channels   = gd.vorb_channels;
+                        if (gd.total_samples > 0 && gd.vorb_sample_rate > 0)
+                            e->durationSec = (double)gd.total_samples / (double)gd.vorb_sample_rate;
+                        e->metaReady = true;
+                    }
+                    ogg_close(&gd);
+                } else if (dot && _stricmp(dot, ".opus") == 0) {
+                    OpusWrapDecoder od;
+                    memset(&od, 0, sizeof(od));
+                    if (opus_open(&od, e->path) && od.total_frames_48k > 0) {
+                        e->sampleRate  = od.sample_rate;
+                        e->channels    = od.channels;
+                        e->durationSec = (double)od.total_frames_48k / 48000.0; // wall-clock seconds
+                        e->metaReady   = true;
+                    }
+                    opus_close(&od);
+                } else if (dot && (_stricmp(dot, ".m4a") == 0 ||
+                                   _stricmp(dot, ".aac") == 0 ||
+                                   _stricmp(dot, ".wma") == 0)) {
+                    double dur = 0.0; int rate = 0, ch = 0;
+                    if (media_read_meta_mf(e->path, &dur, &rate, &ch)) {
+                        e->durationSec = dur;
+                        e->sampleRate  = rate;
+                        e->channels    = ch;
+                        e->metaReady   = true;
+                    }
+                }
             }
         } while (FindNextFileW(hFind, &fd) != 0);
         FindClose(hFind);
@@ -906,6 +1002,107 @@ static void media_sb_commit(HWND hwnd, const RECT* rc) {
 }
 
 // ---------------------------------------------------------------------------
+// Left directory-pane custom scrollbar. Mirrors the right-pane scrollbar but
+// hugs the LEFT edge of the left pane and scrolls g_mediaDirScroll over the
+// folder rows (g_mediaDirCount). The pinned "[..] Up" row (when present) is
+// always visual row 0, so it reduces the scrollable span by one.
+// ---------------------------------------------------------------------------
+static int media_dir_sb_up_offset(void) {
+    return (g_mediaCurDir[0] != '\0') ? 1 : 0;
+}
+
+static void media_dir_sb_update(const RECT* rc) {
+    MediaLayout L;
+    media_compute_layout(rc, &L);
+    int upOffset = media_dir_sb_up_offset();
+    int contentPx = g_mediaDirCount * L.rowH;
+    int visiblePx = (L.leftPane.bottom - L.leftPane.top) - scale_y(20);
+    if (visiblePx < 0) visiblePx = 0;
+    g_mediaDirSb.totalContent = contentPx;
+    g_mediaDirSb.visibleHeight = visiblePx;
+    g_mediaDirSb.scrollPos = g_mediaDirScroll * L.rowH;
+    g_mediaDirSb.visible = contentPx > visiblePx;
+    int maxScroll = g_mediaDirCount - (L.leftVisible - upOffset);
+    if (maxScroll < 0) maxScroll = 0;
+    if (g_mediaDirScroll > maxScroll) g_mediaDirScroll = maxScroll;
+    if (g_mediaDirScroll < 0) g_mediaDirScroll = 0;
+}
+
+static bool media_dir_sb_get_geom(const RECT* rc, RefractSbGeom* geo) {
+    memset(geo, 0, sizeof(*geo));
+    MediaLayout L;
+    media_compute_layout(rc, &L);
+    int trackTop = L.leftPane.top + 2;
+    int trackBottom = L.leftPane.bottom;
+    int trackLen = trackBottom - trackTop;
+    if (trackLen < cseq_sb_width()) return false;
+
+    geo->visible = g_mediaDirSb.visible;
+    geo->scrollMin = 0;
+    geo->scrollRange = g_mediaDirSb.totalContent;
+    geo->pagePx = g_mediaDirSb.visibleHeight;
+    geo->left = L.leftPane.left;
+    geo->right = L.leftPane.left + cseq_sb_width();
+    geo->trackTop = trackTop;
+    geo->trackBottom = trackBottom;
+
+    int total = g_mediaDirSb.totalContent;
+    int visible = g_mediaDirSb.visibleHeight;
+    if (total <= 0) return false;
+
+    int thumbLen = (total > visible)
+                   ? (int)((float)trackLen * ((float)visible / (float)total))
+                   : trackLen;
+    if (thumbLen < scale_y(28)) thumbLen = scale_y(28);
+    if (thumbLen > trackLen) thumbLen = trackLen;
+
+    float frac = (total > visible)
+                 ? (float)(g_mediaDirScroll * L.rowH) / (float)(total - visible)
+                 : 0.0f;
+    if (frac < 0.0f) frac = 0.0f;
+    if (frac > 1.0f) frac = 1.0f;
+
+    int thumbTop = trackTop + (int)(frac * (float)(trackLen - thumbLen));
+    geo->thumbTop = thumbTop;
+    geo->thumbBottom = thumbTop + thumbLen;
+    return true;
+}
+
+static void media_dir_sb_draw(HDC hdc, const RECT* rc) {
+    if (!g_mediaDirSb.visible) return;
+    RefractSbGeom geo;
+    if (!media_dir_sb_get_geom(rc, &geo) || !geo.visible) return;
+
+    RECT trackRt = { geo.left, geo.trackTop, geo.right, geo.trackBottom };
+    HBRUSH trackBrush = CreateSolidBrush(RGB(28, 33, 42));
+    FillRect(hdc, &trackRt, trackBrush);
+    DeleteObject(trackBrush);
+
+    bool hot = (g_mediaDirSb.dragging || g_mediaDirSb.hoverThumb);
+    COLORREF thumbCol = hot ? RGB(80, 100, 120) : RGB(60, 75, 90);
+    int marginX = scale_x(2);
+    int thumbX = geo.left + marginX;
+    int thumbW = (geo.right - geo.left) - marginX * 2;
+    int thumbY = geo.thumbTop;
+    int thumbH = geo.thumbBottom - geo.thumbTop;
+    if (thumbW > 0 && thumbH > 0) {
+        float radius = (float)thumbW * 0.5f;
+        cseq_sb_draw_aa_thumb(hdc, thumbX, thumbY, thumbW, thumbH, radius, thumbCol);
+    }
+}
+
+static void media_dir_sb_commit(HWND hwnd, const RECT* rc) {
+    MediaLayout L;
+    media_compute_layout(rc, &L);
+    int upOffset = media_dir_sb_up_offset();
+    int maxScroll = g_mediaDirCount - (L.leftVisible - upOffset);
+    if (maxScroll < 0) maxScroll = 0;
+    if (g_mediaDirScroll > maxScroll) g_mediaDirScroll = maxScroll;
+    if (g_mediaDirScroll < 0) g_mediaDirScroll = 0;
+    InvalidateRect(hwnd, NULL, FALSE);
+}
+
+// ---------------------------------------------------------------------------
 // Seek the audition voice to the frame under the mouse and latch the UI
 // playhead there. Also records the seek timestamp so the draw pass won't
 // immediately re-anchor to a stale audio-thread frame (rubber-banding).
@@ -1217,7 +1414,7 @@ static void media_paint(HDC hdc, const RECT* rc) {
         int row = 0;
         bool hasUp = (g_mediaCurDir[0] != '\0');
         if (hasUp) {
-            RECT upRc = { L.leftPane.left + 2, L.leftPane.top + 2 + row * L.rowH,
+            RECT upRc = { L.leftPane.left + sbW + 2, L.leftPane.top + 2 + row * L.rowH,
                           L.leftPane.right - 2, L.leftPane.top + 2 + (row + 1) * L.rowH };
             HBRUSH upBr = CreateSolidBrush(g_mediaSelDir == -2 ? RGB(26, 44, 54) : RGB(19, 24, 31));
             FillRect(memDC, &upRc, upBr);
@@ -1231,7 +1428,7 @@ static void media_paint(HDC hdc, const RECT* rc) {
             if (visRow < upOffset) continue; // folders are only rendered at visRow >= 1, leaving visual row 0 visible as [..] Up
             if (visRow >= L.leftVisible) break;
             MediaEntry* e = &entries[i];
-            RECT rRc = { L.leftPane.left + 2, L.leftPane.top + 2 + visRow * L.rowH,
+            RECT rRc = { L.leftPane.left + sbW + 2, L.leftPane.top + 2 + visRow * L.rowH,
                          L.leftPane.right - 2, L.leftPane.top + 2 + (visRow + 1) * L.rowH };
             bool sel = (i == g_mediaSelDir);
             HBRUSH rBr = CreateSolidBrush(sel ? RGB(26, 44, 54) : RGB(19, 24, 31));
@@ -1243,6 +1440,8 @@ static void media_paint(HDC hdc, const RECT* rc) {
             RECT dRc = { rRc.left + scale_x(8), rRc.top, rRc.right - scale_x(8), rRc.bottom };
             media_draw_text_utf8(memDC, disp, &dRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
         }
+        // Custom scrollbar on the left edge of the directory pane.
+        media_dir_sb_draw(memDC, rc);
     }
 
     // Right pane: audio files.
@@ -1406,6 +1605,7 @@ static LRESULT CALLBACK MediaExplorerWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         // Invalidate the entire client area so BitBlt is never clipped to a partial edge
         RECT rc; GetClientRect(hwnd, &rc);
         media_update_sb(&rc);
+        media_dir_sb_update(&rc);
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
     }
@@ -1424,6 +1624,7 @@ static LRESULT CALLBACK MediaExplorerWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         media_sort_entries();
         RECT rc; GetClientRect(hwnd, &rc);
         media_update_sb(&rc);
+        media_dir_sb_update(&rc);
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
     }
@@ -1466,6 +1667,29 @@ static LRESULT CALLBACK MediaExplorerWndProc(HWND hwnd, UINT msg, WPARAM wParam,
                         if (rows < 1) rows = 1;
                         g_mediaFileScroll += (part == CSEQ_SB_TRACK_UP) ? -rows : rows;
                         media_sb_commit(hwnd, &rc);
+                    }
+                    return 0;
+                }
+            }
+        }
+
+        // Left-pane custom scrollbar: thumb drag or track page scroll.
+        {
+            RefractSbGeom sg;
+            if (media_dir_sb_get_geom(&rc, &sg)) {
+                RefractSbPart part = cseq_sb_hit_test(&sg, mx, my);
+                if (part != CSEQ_SB_NONE) {
+                    if (part == CSEQ_SB_THUMB) {
+                        g_mediaDirSb.dragging = true;
+                        g_mediaDirSb.grabOffsetPx = my - sg.thumbTop;
+                        SetCapture(hwnd);
+                        InvalidateRect(hwnd, NULL, FALSE);
+                    } else {
+                        // Page by the visible row count.
+                        int rows = L.leftVisible;
+                        if (rows < 1) rows = 1;
+                        g_mediaDirScroll += (part == CSEQ_SB_TRACK_UP) ? -rows : rows;
+                        media_dir_sb_commit(hwnd, &rc);
                     }
                     return 0;
                 }
@@ -1629,6 +1853,31 @@ static LRESULT CALLBACK MediaExplorerWndProc(HWND hwnd, UINT msg, WPARAM wParam,
             return 0;
         }
 
+        // Left directory-pane scrollbar thumb drag.
+        if (g_mediaDirSb.dragging) {
+            RECT rc; GetClientRect(hwnd, &rc);
+            RefractSbGeom geo;
+            if (!media_dir_sb_get_geom(&rc, &geo)) {
+                g_mediaDirSb.dragging = false;
+                ReleaseCapture();
+                return 0;
+            }
+            int trackLen = geo.trackBottom - geo.trackTop;
+            int thumbLen = geo.thumbBottom - geo.thumbTop;
+            int denom = trackLen - thumbLen;
+            if (denom > 0) {
+                float frac = (float)(my - g_mediaDirSb.grabOffsetPx - geo.trackTop) / (float)denom;
+                if (frac < 0.0f) frac = 0.0f;
+                if (frac > 1.0f) frac = 1.0f;
+                int span = geo.scrollRange - geo.pagePx;
+                if (span < 0) span = 0;
+                MediaLayout L; media_compute_layout(&rc, &L);
+                g_mediaDirScroll = (int)(frac * (float)span / (float)L.rowH + 0.5f);
+                media_dir_sb_commit(hwnd, &rc);
+            }
+            return 0;
+        }
+
         // Smooth scrubbing across waveform
         if (g_mediaWaveDragging) {
             RECT rc; GetClientRect(hwnd, &rc);
@@ -1682,6 +1931,12 @@ static LRESULT CALLBACK MediaExplorerWndProc(HWND hwnd, UINT msg, WPARAM wParam,
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }
+        if (g_mediaDirSb.dragging) {
+            g_mediaDirSb.dragging = false;
+            if (GetCapture() == hwnd) ReleaseCapture();
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
         if (g_mediaWaveDragging) {
             g_mediaWaveDragging = false;
             ReleaseCapture();
@@ -1722,6 +1977,11 @@ static LRESULT CALLBACK MediaExplorerWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         if (g_mediaSb.dragging) {
             g_mediaSb.dragging = false;
             g_mediaSb.grabOffsetPx = 0;
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        if (g_mediaDirSb.dragging) {
+            g_mediaDirSb.dragging = false;
+            g_mediaDirSb.grabOffsetPx = 0;
             InvalidateRect(hwnd, NULL, FALSE);
         }
         return 0;
@@ -1782,10 +2042,7 @@ static LRESULT CALLBACK MediaExplorerWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         } else if (pt.x >= L.leftPane.left && pt.x <= L.leftPane.right) {
             int step = (zDelta > 0) ? -1 : 1;
             g_mediaDirScroll += step;
-            // Clamp maximum scroll
-            if (g_mediaDirScroll > g_mediaDirCount - 1) g_mediaDirScroll = g_mediaDirCount - 1;
-            if (g_mediaDirScroll < 0) g_mediaDirScroll = 0;
-            InvalidateRect(hwnd, NULL, FALSE);
+            media_dir_sb_commit(hwnd, &rc);
         }
         return 0;
     }
@@ -1927,10 +2184,11 @@ static inline void open_media_explorer(HWND parentHwnd) {
     audition_set_volume(g_mediaVolume);
     audition_set_speed(g_mediaSpeed);
 
-    // Refresh the right-pane scrollbar range for the current client size.
+    // Refresh the pane scrollbar ranges for the current client size.
     {
         RECT cr; GetClientRect(g_mediaHwnd, &cr);
         media_update_sb(&cr);
+        media_dir_sb_update(&cr);
     }
 
     // Repaint timer drives the waveform scrub head while a preview plays.

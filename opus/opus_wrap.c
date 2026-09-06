@@ -99,6 +99,15 @@ static float* opus_resample_stereo_48k(const float* inPcm, uint64_t inFrames,
 
 // --- Public API --------------------------------------------------------------
 
+// Reads stream metadata from the opened OggOpusFile into the decoder struct.
+static void opus_read_meta(OpusWrapDecoder* d, OggOpusFile* of) {
+    const OpusHead* head = op_head(of, 0);
+    d->channels = op_channel_count(of, 0);
+    d->sample_rate = (head && head->input_sample_rate > 0) ? (int)head->input_sample_rate : 48000;
+    ogg_int64_t total = op_pcm_total(of, -1);
+    d->total_frames_48k = (total > 0) ? (uint64_t)total : 0;
+}
+
 bool opus_open(OpusWrapDecoder* d, const char* filepath) {
     if (!d || !filepath || !filepath[0]) return false;
     memset(d, 0, sizeof(OpusWrapDecoder));
@@ -123,6 +132,7 @@ bool opus_open(OpusWrapDecoder* d, const char* filepath) {
 
     d->internal = (void*)of;
     d->file = (void*)fp;
+    opus_read_meta(d, of);
     return true;
 }
 
@@ -135,6 +145,7 @@ bool opus_open_memory(OpusWrapDecoder* d, const void* data, size_t size) {
     if (!of || err != 0) return false;
 
     d->internal = (void*)of;
+    opus_read_meta(d, of);
     return true;
 }
 

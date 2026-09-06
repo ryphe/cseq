@@ -1,4 +1,4 @@
-# cseq — Architecture & Design Guide (1.34)
+# cseq — Architecture & Design Guide (1.35)
 
 This is the authoritative reference for how the engine is built, how it threads, how memory is owned, and how to extend it without breaking real-time safety.
 
@@ -116,7 +116,7 @@ slow work and post results back to the UI:
 | SF2 preset rebuild | `SFontCacheBuildThreadProc` (`soundfont.h:290`) | Re-renders active preset, atomic bank swap |
 | EQ curve | `EqCurveWorkerThreadProc` (`dialogs.h:1774`) | Supersampled EQ curve bitmap render |
 | Visualizer vsync | `vis_vsync_thread_proc` (`visualizer.h:825`) | `DwmFlush` + invalidate at vsync |
-| Media dir scan | `media_scan_thread_proc` (`media.h:144`) | `FindFirstFileW`/`FindNextFileW` folder enumeration + audio metadata |
+| Media dir scan | `media_scan_thread_proc` (`media.h:144`) | `FindFirstFileW`/`FindNextFileW` folder enumeration + audio metadata (miniaudio, falling back to stb_vorbis/opusfile/Media Foundation for ogg/opus/m4a/aac/wma) |
 | Media preview decode | `media_preview_thread_proc` (`media.h:252`) | Decodes selected file into audition ping-pong buffer, builds waveform peaks |
 
 All workers use the shared **job system** (`job_begin`/`job_end`/
@@ -490,7 +490,10 @@ an integrated audition voice (`headers/audition.h`):
 2. **Background dir scan.** `media_scan_thread_proc` (`media.h:144`) runs
    `FindFirstFileW`/`FindNextFileW` and header-only `ma_decoder` metadata reads
    on a worker; it publishes the entry list under `g_mediaListLock` (UI/worker
-   only — never the audio thread) and posts `WM_APP_MEDIA_LIST`.
+   only — never the audio thread) and posts `WM_APP_MEDIA_LIST`. When miniaudio
+   lacks a backend (ogg/opus/m4a/aac/wma) the metadata read falls back to the
+   same decoders the preview path uses (stb_vorbis, the vendored opusfile stack,
+   Media Foundation) so every listed format reports duration/sample-rate/channels.
 3. **Background preview decode.** `media_preview_thread_proc` (`media.h:252`)
    decodes the selected file into the *inactive* audition ping-pong slot,
    builds min/max waveform peaks, and publishes via `audition_play()`. It is
